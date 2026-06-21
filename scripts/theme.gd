@@ -24,6 +24,7 @@ const EMBER := Color("ffb24a")      # tek parlak an (skor)
 const GOOD := Color("5fb061")       # geçerli/başarı yeşili
 const LILAC := Color("7e6ba8")      # efsane joker
 const SHADOW := Color("0a1f19")     # gölge
+const CHARCOAL := Color("2b2b33")   # koyu charcoal (Balatro referansı) — tur renklerinden biri
 
 # Nadirlik → renk (joker kenarı)
 const RARITY := {
@@ -36,8 +37,8 @@ const RARITY := {
 # Font: m6x11plus (Balatro'nun fontu; tok pixel, tam Türkçe, ticari serbest+atıf).
 # Crisp pixel için antialiasing kapalı.
 static func load_font() -> FontFile:
-	var f := FontFile.new()
-	f.data = FileAccess.get_file_as_bytes("res://assets/fonts/m6x11plus.ttf")
+	# Import edilmiş FontFile'ı yükle (export'ta ham .ttf pakete girmez; load() remap'le çalışır).
+	var f: FontFile = load("res://assets/fonts/m6x11plus.ttf")
 	f.antialiasing = TextServer.FONT_ANTIALIASING_NONE
 	f.hinting = TextServer.HINTING_NONE
 	f.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
@@ -45,9 +46,7 @@ static func load_font() -> FontFile:
 
 # TAŞ harfi fontu: PaytoneOne (kalın/net — pixel font taşta okunmuyordu).
 static func load_tile_font() -> FontFile:
-	var f := FontFile.new()
-	f.data = FileAccess.get_file_as_bytes("res://assets/fonts/PaytoneOne.ttf")
-	return f
+	return load("res://assets/fonts/PaytoneOne.ttf")
 
 static func make_theme(font: FontFile) -> Theme:
 	var t := Theme.new()

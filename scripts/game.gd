@@ -51,6 +51,7 @@ var _coin_sfx: AudioStreamPlayer # puan toplama (collect) tıkları
 var _collect: AudioStream        # tek puan varış tık'ı (prosedürel coin)
 var _collect_big: AudioStream    # final toplam çan'ı (prosedürel)
 var _coin_idx := 0               # ardışık coin → yükselen perde
+var _bam := 0                    # ardışık katkı (op) → yükselen perdeli "bam"
 
 # UI refs (sol panel)
 var blind_header: Label
@@ -91,6 +92,11 @@ var joker_box: HBoxContainer
 var joker_caption: Label
 var play_btn: Button
 var disc_btn: Button
+var shuffle_btn: Button
+var _shuffle_sb: StyleBoxFlat     # yuvarlak shuffle butonu dolgusu (tur rengine göre renklenir)
+var _shuffle_hover_sb: StyleBoxFlat   # hover (açılmış + büyük gölge)
+var _shuffle_pressed_sb: StyleBoxFlat # basılı (koyu + küçük gölge)
+var _shuffle_icon: TextureRect    # pixel-art shuffle ikonu
 # efekt katmanı + sarsıntı kabı
 var fx_layer: Node2D
 var shaker: Control
@@ -833,22 +839,101 @@ func _build_action_row() -> Control:
 	disc_btn.add_theme_stylebox_override("pressed", T.button_pressed(T.FELT_700))
 	disc_btn.custom_minimum_size = Vector2(230, 0)
 	disc_btn.pressed.connect(_on_discard)
-	# KARIŞTIR (shuffle) — OYNA ile DEĞİŞTİR arasında, logo-tarzı kare ikon buton (harfleri rastgele dizer)
-	var shuffle_btn := Button.new()
-	shuffle_btn.text = "🔀"
-	shuffle_btn.add_theme_font_size_override("font_size", 34)
-	shuffle_btn.add_theme_color_override("font_color", T.INK)
-	shuffle_btn.add_theme_stylebox_override("normal", T.button_filled(T.LILAC))
-	shuffle_btn.add_theme_stylebox_override("hover", T.button_filled(T.LILAC.lightened(0.1)))
-	shuffle_btn.add_theme_stylebox_override("pressed", T.button_pressed(T.LILAC))
+	# KARIŞTIR (shuffle) — OYNA ile DEĞİŞTİR arasında, TAM YUVARLAK buton + pixel-art ikon.
+	# Dolgu rengi tur paletine göre değişir (_style_shuffle, palette tween'inde lerp'lenir).
+	shuffle_btn = Button.new()
+	var ssz := 78.0
+	shuffle_btn.custom_minimum_size = Vector2(ssz, ssz)
+	var srad := int(ssz / 2.0)  # tam yuvarlak
+	_shuffle_sb = _round_sb(T.FELT_HI, srad, 7, Vector2(0, 5))                    # normal: gölgeli
+	_shuffle_hover_sb = _round_sb(T.FELT_HI.lightened(0.12), srad, 11, Vector2(0, 7))  # hover: açık + büyük gölge
+	_shuffle_pressed_sb = _round_sb(T.FELT_HI.darkened(0.1), srad, 3, Vector2(0, 2))   # basılı: koyu + küçük gölge
+	shuffle_btn.add_theme_stylebox_override("normal", _shuffle_sb)
+	shuffle_btn.add_theme_stylebox_override("hover", _shuffle_hover_sb)
+	shuffle_btn.add_theme_stylebox_override("pressed", _shuffle_pressed_sb)
 	shuffle_btn.add_theme_constant_override("outline_size", 0)
-	shuffle_btn.custom_minimum_size = Vector2(78, 78)
 	shuffle_btn.tooltip_text = "Harfleri karıştır"
+	shuffle_btn.pivot_offset = Vector2(ssz, ssz) / 2.0  # ortadan ölçeklensin (hover kalkma)
+	shuffle_btn.mouse_entered.connect(func(): _hover_lift(shuffle_btn, 1.1))
+	shuffle_btn.mouse_exited.connect(func(): _hover_lift(shuffle_btn, 1.0))
 	shuffle_btn.pressed.connect(_on_shuffle)
+	# Pixel-art ikon — butonun ortasına (kemik rengi, çoğu palet tonunda okunur)
+	_shuffle_icon = TextureRect.new()
+	_shuffle_icon.texture = _make_shuffle_icon(T.CARD_FACE)
+	_shuffle_icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # crisp pixel
+	_shuffle_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_shuffle_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_shuffle_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shuffle_icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var pad := 20.0
+	_shuffle_icon.offset_left = pad
+	_shuffle_icon.offset_top = pad
+	_shuffle_icon.offset_right = -pad
+	_shuffle_icon.offset_bottom = -pad
+	shuffle_btn.add_child(_shuffle_icon)
 	h.add_child(play_btn)
 	h.add_child(shuffle_btn)
 	h.add_child(disc_btn)
 	return h
+
+func _px(img: Image, x: int, y: int, col: Color) -> void:
+	if x >= 0 and y >= 0 and x < img.get_width() and y < img.get_height():
+		img.set_pixel(x, y, col)
+
+# Sağa bakan pixel ok başı (tip = sağ uç).
+func _arrow_right(img: Image, tx: int, ty: int, col: Color) -> void:
+	for k in range(0, 4):
+		_px(img, tx - k, ty - k, col)
+		_px(img, tx - k, ty + k, col)
+
+# Pixel-art "karıştır" ikonu — iki şerit (üst-sol↘ ve alt-sol↗) ortada çaprazlanır,
+# ikisi de sağda sağa-bakan ok başıyla biter (evrensel shuffle sembolü). Emoji DEĞİL.
+func _make_shuffle_icon(col: Color) -> ImageTexture:
+	var w := 16
+	var h := 14
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	# sol yatay uçlar (2px kalın)
+	for x in range(1, 5):
+		_px(img, x, 3, col); _px(img, x, 4, col)          # üst şerit
+		_px(img, x, h - 5, col); _px(img, x, h - 4, col)  # alt şerit
+	# çaprazlar (2px) — ~(4,3)↘(11,10) ve ~(4,10)↗(11,3)
+	for i in range(0, 8):
+		_px(img, 4 + i, 3 + i, col); _px(img, 4 + i, 3 + i + 1, col)            # ↘
+		_px(img, 4 + i, (h - 4) - i, col); _px(img, 4 + i, (h - 4) - i - 1, col)  # ↗
+	# sağ uçlarda ok başları (sağa bakar)
+	_arrow_right(img, 13, 10, col)
+	_arrow_right(img, 13, 3, col)
+	return ImageTexture.create_from_image(img)
+
+# Yuvarlak, gölgeli stylebox (shuffle butonu için).
+func _round_sb(bg: Color, radius: int, shadow_size: int, shadow_off: Vector2) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = bg
+	s.set_corner_radius_all(radius)
+	s.shadow_color = Color(0, 0, 0, 0.5)
+	s.shadow_size = shadow_size
+	s.shadow_offset = shadow_off
+	s.content_margin_left = 0
+	s.content_margin_right = 0
+	return s
+
+# Hover'da hafif kalkma (büyüme) — diğer juice ile tutarlı.
+func _hover_lift(node: Control, amount: float) -> void:
+	if not is_instance_valid(node):
+		return
+	var tw := create_tween()
+	tw.tween_property(node, "scale", Vector2(amount, amount), 0.1).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# Shuffle buton dolgusunu verilen renge çek (palette tween'inde lerp ile çağrılır).
+# normal/hover/basılı tonlarını birlikte günceller.
+func _style_shuffle(c: Color) -> void:
+	if _shuffle_sb:
+		_shuffle_sb.bg_color = c
+	if _shuffle_hover_sb:
+		_shuffle_hover_sb.bg_color = c.lightened(0.12)
+	if _shuffle_pressed_sb:
+		_shuffle_pressed_sb.bg_color = c.darkened(0.1)
 
 # Harfleri RASTGELE diz (kozmetik — seçim sırası kelimeyi belirler, el sırası değil). + shuffle sesi.
 func _on_shuffle() -> void:
@@ -1278,33 +1363,12 @@ func _layout_hand_keep(new_tiles: Array, sound: bool) -> void:
 	if dealt and sound:
 		_play_shuffle()
 
-# WAV'ı import'suz yükle (RIFF parse → AudioStreamWAV). Fontlar/sözlük gibi ham bayttan.
+# WAV'ı import edilmiş kaynak olarak yükle (export'ta ham .wav pakete girmez; load() remap'le çalışır).
+# Loop, müzik dosyalarında import seviyesinde (edit/loop_mode) ayarlıdır.
 func _load_wav(path: String) -> AudioStream:
-	var bytes := FileAccess.get_file_as_bytes(path)
-	if bytes.size() < 44:
+	var s: AudioStream = load(path)
+	if s == null:
 		push_error("WAV açılamadı: " + path)
-		return null
-	var num_channels := 1
-	var sample_rate := 44100
-	var bits := 16
-	var data := PackedByteArray()
-	var pos := 12
-	while pos + 8 <= bytes.size():
-		var cid := bytes.slice(pos, pos + 4).get_string_from_ascii()
-		var csize := bytes.decode_u32(pos + 4)
-		var body := pos + 8
-		if cid == "fmt ":
-			num_channels = bytes.decode_u16(body + 2)
-			sample_rate = bytes.decode_u32(body + 4)
-			bits = bytes.decode_u16(body + 14)
-		elif cid == "data":
-			data = bytes.slice(body, mini(body + csize, bytes.size()))
-		pos = body + csize + (csize & 1)
-	var s := AudioStreamWAV.new()
-	s.data = data
-	s.format = AudioStreamWAV.FORMAT_16_BITS if bits == 16 else AudioStreamWAV.FORMAT_8_BITS
-	s.mix_rate = sample_rate
-	s.stereo = num_channels == 2
 	return s
 
 # Prosedürel "coin/collect" sesi: verilen frekansları sırayla çalan, üstel sönümlü kısa ton.
@@ -1494,42 +1558,65 @@ func _set_buttons(on: bool) -> void:
 # ── JUICE: sıralı skor çözümü ──
 func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 	chip_value.text = "0"
-	mult_value.text = "1"
 	_coin_idx = 0
+	_bam = 0
 	var li := 0
 	var run_chip := 0
+	var run_mult := float(res["tier"]["mult"])  # taban çarpan (kademe) — baştan görünür
+	mult_value.text = _fmt(run_mult)
 	for step in res["timeline"]:
-		var gain := int(step["chips"]) - run_chip
-		run_chip = int(step["chips"])
 		match step["kind"]:
 			"letter":
+				var tile: Control = null
 				if li < fired.size() and is_instance_valid(fired[li]):
-					_fire_tile(fired[li], gain)
+					tile = fired[li]
 				li += 1
-				_count_label(chip_value, int(step["chips"]), 0.18)
-				mult_value.text = _fmt(step["mult"])
-				_pop(chip_seal_panel, 1.1)
-				await get_tree().create_timer(0.4).timeout  # daha YAVAŞ (kullanıcı: çok hızlı)
+				# 1) Harfin TABAN çipi → taşın üstünde büyük "+N" + taş pop
+				var base := int(step["base"])
+				if base != 0:
+					run_chip += base
+					if tile != null:
+						_fire_tile(tile, base)
+					_count_label(chip_value, run_chip, 0.16)
+					_pop(chip_seal_panel, 1.1)
+					await get_tree().create_timer(0.26).timeout
+				# 2) Harf-üstü geliştirmeler (foil +50 / holo +10 / poly ×1.5) → tek tek pill
+				var anchor: Vector2
+				if tile != null:
+					anchor = _node_center(tile) + Vector2(0, -tile.size.y * 0.5 - 26.0)
+				else:
+					anchor = _node_center(chip_seal_panel)
+				for op in step["ops"]:
+					run_chip = _op_chip(op, run_chip)
+					run_mult = _op_mult(op, run_mult)
+					_show_op(op, anchor, run_chip, run_mult)
+					await get_tree().create_timer(0.3).timeout
+				# kademe değişimleri (drift olmasın diye) adım sonu uzlaştır
+				run_chip = int(step["chips"])
+				run_mult = float(step["mult"])
 			"tier":
-				_count_label(chip_value, int(step["chips"]), 0.2)
+				# Kelime uzunluğu kademesi taban çipi — sadece çip damgası akar/zıplar (yanına yazı YOK)
+				run_chip = int(step["chips"])
+				_count_label(chip_value, run_chip, 0.2)
 				_pop(chip_seal_panel, 1.12)
-				await get_tree().create_timer(0.36).timeout
+				await get_tree().create_timer(0.34).timeout
 			_:
-				# Joker/patron adımı — hangi joker tetiklendi + ne kattı (pill ile)
+				# Joker/patron adımı — hangi joker, ne kattı? Her op tek tek "bam"lar.
 				var jcard := _find_joker_card(String(step.get("id", "")))
 				var src_pos: Vector2
 				if jcard != null:
-					_pop(jcard, 1.22)
-					src_pos = _node_center(jcard) + Vector2(0, -10)
+					_pop(jcard, 1.24)
+					_ember_burst(_node_center(jcard), 10, 2.6)
+					src_pos = _node_center(jcard) + Vector2(0, -jcard.size.y * 0.5 - 18.0)
 				else:
-					src_pos = _node_center(mult_seal_panel)
+					src_pos = _node_center(mult_seal_panel) + Vector2(0, -52)
 				for op in step["ops"]:
-					_float_op_pill(src_pos, _op_value(op), _op_label(op), _op_color(op))
-				_count_label(chip_value, int(step["chips"]), 0.1)
-				mult_value.text = _fmt(step["mult"])
-				_pop(mult_seal_panel, 1.18)
-				_ember_burst(_node_center(mult_seal_panel), 14, 2.8)
-				await get_tree().create_timer(0.46).timeout  # joker adımı daha belirgin/yavaş
+					run_chip = _op_chip(op, run_chip)
+					run_mult = _op_mult(op, run_mult)
+					_show_op(op, src_pos, run_chip, run_mult)
+					await get_tree().create_timer(0.34).timeout
+				run_chip = int(step["chips"])
+				run_mult = float(step["mult"])
 	# Final: çip × çarpan patlaması
 	chip_value.text = str(res["chips"])
 	mult_value.text = _fmt(res["mult"])
@@ -1552,6 +1639,43 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 	_ember_burst(_node_center(round_score_label), 8, 2.6)
 	await get_tree().create_timer(0.5).timeout
 
+# Tek bir katkıyı (op) GÖSTER: uçan pill + ilgili damga (çip/çarpan) pop + kıvılcım +
+# yükselen perdeli "bam" sesi + sayacı yeni değere akıt. run = op SONRASI değer.
+func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float) -> void:
+	var is_chip: bool = op.get("op", "") == "chip"
+	# Katkı, ETKİ ETTİĞİ yerde (harf/joker üstü) karo'lu büyük puan + "ÇARPAN/ÇİP" etiketiyle (Balatro tarzı).
+	_float_num(src_pos, _op_value(op), T.CHIP_BADGE if is_chip else T.MULT, "ÇİP" if is_chip else "ÇARPAN")
+	if is_chip:
+		_count_label(chip_value, run_chip, 0.14)
+		_pop(chip_seal_panel, 1.2)
+		_ember_burst(_node_center(chip_seal_panel), 9, 2.4)
+	else:
+		mult_value.text = _fmt(run_mult)
+		_pop(mult_seal_panel, 1.22)
+		_ember_burst(_node_center(mult_seal_panel), 11, 2.8)
+	_bam_sound()
+
+# op SONRASI çip değeri (görsel sayaç için engine matematiğini yansıtır).
+func _op_chip(op: Dictionary, chip: int) -> int:
+	if op.get("op", "") == "chip":
+		return chip + int(op["n"])
+	return chip
+
+# op SONRASI çarpan değeri.
+func _op_mult(op: Dictionary, mult: float) -> float:
+	match op.get("op", ""):
+		"mult": return mult + float(op["n"])
+		"xmult": return mult * float(op["n"])
+	return mult
+
+# Ardışık katkılarda perdesi yükselen kısa "bam" (tatmin zinciri).
+func _bam_sound() -> void:
+	if _ui_sfx and _blink:
+		_ui_sfx.stream = _blink
+		_ui_sfx.pitch_scale = 1.0 + min(_bam * 0.07, 0.9)
+		_ui_sfx.play()
+	_bam += 1
+
 func _fire_tile(tile: Control, gain: int) -> void:
 	var tw := create_tween()
 	tw.tween_property(tile, "scale", Vector2(1.22, 1.22), 0.08).set_trans(Tween.TRANS_BACK)
@@ -1559,24 +1683,30 @@ func _fire_tile(tile: Control, gain: int) -> void:
 	_ember_burst(_node_center(tile), 12, 3.0)
 	if _ui_sfx and _blink:           # harf "blink" sesi (kullanıcı ekledi) — her puan gelişinde
 		_ui_sfx.stream = _blink
+		_ui_sfx.pitch_scale = 1.0   # op zinciri perdeyi yükseltmiş olabilir → taban perdeye dön
 		_ui_sfx.play()
 	if gain > 0:
 		_float_gain_on_tile(tile, gain)  # +N taşın TEPESİNDE belirir (sola uçmaz)
 
-# Oynanan taşın TEPESİNDE Balatro tarzı BÜYÜK "+N" (beyaz, kalın koyu kontur) + küçük mavi karo aksanı.
+# Oynanan taşın TEPESİNDE Balatro tarzı BÜYÜK "+N" (beyaz, kalın koyu kontur) + mavi karo aksanı.
 func _float_gain_on_tile(tile: Control, gain: int) -> void:
 	if not is_instance_valid(tile):
 		return
+	var top := _node_center(tile) + Vector2(0.0, -tile.size.y * 0.5 - 16.0)
+	_float_num(top, "+%d" % gain, T.CHIP_BADGE)
+
+# Verilen KONUMDA karo'lu büyük puan ("+50" / "×1.5" / "+10"). color = karo rengi
+# (çip → mavi, çarpan → kırmızı). Radiuslu pill DEĞİL — keskin karo + kalın puan.
+func _float_num(top: Vector2, text: String, color: Color, label: String = "") -> void:
 	var holder := Control.new()
 	holder.z_index = 46
 	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(holder)
-	var top := _node_center(tile) + Vector2(0.0, -tile.size.y * 0.5 - 16.0)
 	holder.position = top
 	# KARO — büyük, ORTALI, DÜŞÜK opacity (pixel). ÖNCE gelir; puan ÜSTÜNE biner.
 	var dia := Panel.new()
 	var dsb := StyleBoxFlat.new()
-	dsb.bg_color = Color(T.CHIP_BADGE.r, T.CHIP_BADGE.g, T.CHIP_BADGE.b, 0.32)  # düşük opacity
+	dsb.bg_color = Color(color.r, color.g, color.b, 0.32)  # düşük opacity
 	dsb.set_corner_radius_all(0)
 	dsb.anti_aliasing = false
 	dia.add_theme_stylebox_override("panel", dsb)
@@ -1589,16 +1719,28 @@ func _float_gain_on_tile(tile: Control, gain: int) -> void:
 	dia.modulate.a = 0.0
 	dia.scale = Vector2(0.4, 0.4)
 	holder.add_child(dia)
-	# "+N" — karonun TAM ÜSTÜNDE ortalı (yanında DEĞİL), beyaz kalın kontur, pixel font; SONRA gelir
-	var lbl := _label("+%d" % gain, 46, Color.WHITE, Color(0.05, 0.03, 0.04), 6)
+	# Puan — karonun TAM ÜSTÜNDE ortalı (yanında DEĞİL), beyaz kalın kontur, pixel font; SONRA gelir
+	var lbl := _label(text, 46, Color.WHITE, Color(0.05, 0.03, 0.04), 6)
 	lbl.add_theme_font_override("font", _tile_font)
-	lbl.size = Vector2(120, 60)
-	lbl.position = Vector2(-60, -30)
+	lbl.size = Vector2(140, 60)
+	lbl.position = Vector2(-70, -30)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	lbl.modulate.a = 0.0
 	holder.add_child(lbl)
+	# "ÇARPAN" / "ÇİP" küçük etiketi (Balatro "X2 Mult" tarzı) — değerin ALTINDA, renk tonlu
+	var slbl: Label = null
+	if label != "":
+		slbl = _label(label, 19, color.lerp(Color.WHITE, 0.25), Color(0.05, 0.03, 0.04), 4)
+		slbl.add_theme_font_override("font", _tile_font)
+		slbl.size = Vector2(150, 26)
+		slbl.position = Vector2(-75, 26)
+		slbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		slbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		slbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slbl.modulate.a = 0.0
+		holder.add_child(slbl)
 	# 1) ÖNCE karo: küçükten yaylanarak belir
 	var dt := create_tween()
 	dt.set_parallel(true)
@@ -1609,6 +1751,8 @@ func _float_gain_on_tile(tile: Control, gain: int) -> void:
 	var lt := create_tween()
 	lt.tween_interval(0.2)
 	lt.tween_property(lbl, "modulate:a", 1.0, 0.14)
+	if slbl != null:
+		lt.parallel().tween_property(slbl, "modulate:a", 1.0, 0.14)
 	# 3) Birlikte yavaşça yüksel + sön
 	var rt := create_tween()
 	rt.tween_interval(0.55)
@@ -2108,6 +2252,7 @@ const COOL_PALETTES := [
 	[Color(0.10, 0.06, 0.18), Color(0.18, 0.12, 0.30), Color(0.34, 0.22, 0.50)],        # mor
 	[Color(0.05, 0.14, 0.13), Color(0.08, 0.26, 0.24), Color(0.14, 0.44, 0.40)],        # teal
 	[Color(0.15, 0.10, 0.04), Color(0.26, 0.17, 0.07), Color(0.44, 0.30, 0.12)],        # amber
+	[Color(0.085, 0.085, 0.10), Color(0.17, 0.17, 0.20), Color(0.30, 0.30, 0.36)],      # charcoal (Balatro koyu)
 ]
 const BOSS_PALETTE := [Color(0.17, 0.03, 0.03), Color(0.33, 0.07, 0.05), Color(0.55, 0.13, 0.10)]
 
@@ -2127,14 +2272,17 @@ func _apply_blind_palette() -> void:
 	var to_side: Color = (target[0] as Color)  # sol panel = palet deep tonu (belirgin)
 	var to_themed: Color = (target[1] as Color).darkened(0.15)  # iç paneller = palet felt tonu
 	var fs: Color = _sidebar_sb.bg_color if _sidebar_sb else T.SIDEBAR
+	var sh_from: Color = _shuffle_sb.bg_color if _shuffle_sb else T.FELT_HI
 	_pal_from = [
 		_pal_mat.get_shader_parameter("color_deep"),
 		_pal_mat.get_shader_parameter("color_felt"),
 		_pal_mat.get_shader_parameter("color_high"),
 		fs,
 		_cur_themed,
+		sh_from,
 	]
-	_pal_to = [target[0], target[1], target[2], to_side, to_themed]
+	# shuffle butonu = paletin "high" tonu (en belirgin) — biraz canlandır
+	_pal_to = [target[0], target[1], target[2], to_side, to_themed, (target[2] as Color).lightened(0.06)]
 	_cur_themed = to_themed
 	if _palette_tween and _palette_tween.is_valid():
 		_palette_tween.kill()
@@ -2152,6 +2300,8 @@ func _palette_step(t: float) -> void:
 	var tc := (_pal_from[4] as Color).lerp(_pal_to[4], t)
 	for sb in _themed_sbs:
 		sb.bg_color = tc
+	if _shuffle_sb and _pal_from.size() > 5:
+		_style_shuffle((_pal_from[5] as Color).lerp(_pal_to[5], t))
 
 func _rebuild_jokers() -> void:
 	for c in joker_box.get_children():
@@ -2196,6 +2346,8 @@ var _overlay_dim: ColorRect     # arka karartma (game-over'da kırmızı tint)
 var _overlay_panel: PanelContainer
 var _shop_reward = null
 var _shop_msg := ""             # son satın alma sonucu (örn. "A harfin YALDIZ oldu")
+var _shop_tags: Array = []      # fiyat etiketleri — layout sonrası ortalanır (call_deferred)
+var _marquee_node: Control = null  # SHOP marquee (ampuller layout sonrası dizilir)
 
 func _ensure_overlay() -> void:
 	if overlay and is_instance_valid(overlay):
@@ -2593,84 +2745,303 @@ func _card_sb(accent: Color, hi: bool) -> StyleBoxFlat:
 func _build_shop_ui() -> void:
 	for c in shop_view.get_children():
 		c.queue_free()
+	_shop_tags = []
 
-	# Çerçeveli dükkân tezgahı (felt üstünde dağınık durmasın)
-	var frame := PanelContainer.new()
-	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	var fsb := StyleBoxFlat.new()
-	fsb.bg_color = Color(0.03, 0.06, 0.05, 0.62)
-	fsb.set_corner_radius_all(18)
-	fsb.set_border_width_all(3)
-	fsb.border_color = T.BRASS
-	fsb.content_margin_left = 24
-	fsb.content_margin_right = 24
-	fsb.content_margin_top = 16
-	fsb.content_margin_bottom = 20
-	frame.add_theme_stylebox_override("panel", fsb)
-	shop_view.add_child(frame)
-	var inner := VBoxContainer.new()
-	inner.add_theme_constant_override("separation", 14)
-	frame.add_child(inner)
-
-	# Marquee başlık
-	var header := PanelContainer.new()
-	header.add_theme_stylebox_override("panel", _marquee_box())
-	header.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	var hv := VBoxContainer.new()
-	hv.alignment = BoxContainer.ALIGNMENT_CENTER
-	hv.add_child(_center(_label("DUKKAN", 40, Color(1.0, 0.85, 0.32), Color(0.09, 0.04, 0.03), 5)))
-	var sub := "Run'ını geliştir!"
+	# ── MARQUEE (SHOP — ampullü tiyatro tabelası) ──
+	shop_view.add_child(_center_h(_build_marquee()))
 	if _shop_reward:
-		sub = "Tur geçildi!   +$%d   (taban %d · hak %d · faiz %d)" % [
+		var sub := "Tur geçildi!   +$%d   (taban %d · hak %d · faiz %d)" % [
 			_shop_reward["total"], _shop_reward["base"], _shop_reward["leftover"], _shop_reward["interest"]]
-	hv.add_child(_center(_label(sub, 17, T.TEXT)))
+		shop_view.add_child(_center(_label(sub, 15, T.TEXT_DIM)))
 	if _shop_msg != "":
-		hv.add_child(_center(_label(_shop_msg, 16, T.EMBER)))
-	header.add_child(hv)
-	inner.add_child(_center_h(header))
+		shop_view.add_child(_center(_label(_shop_msg, 16, T.EMBER)))
 
 	var shop = state["run"]["shop"]
-	# Gövde: SOL [Sonraki Tur / Yenile] | SAĞ [jokerler + paketler]
-	var body := HBoxContainer.new()
-	body.add_theme_constant_override("separation", 18)
-	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	inner.add_child(body)
 
-	var lcol := VBoxContainer.new()
-	lcol.add_theme_constant_override("separation", 12)
-	lcol.custom_minimum_size = Vector2(168, 0)
+	# ── TEZGAH (tray) — felt'ten biraz açık, kalın koyu kenar, yuvarlak ──
+	var tray := PanelContainer.new()
+	tray.add_theme_stylebox_override("panel", _shop_tray_sb())
+	tray.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	shop_view.add_child(tray)
+	var trow := HBoxContainer.new()
+	trow.add_theme_constant_override("separation", 16)
+	tray.add_child(trow)
+
+	# Sol kenar aksiyon butonları: SONRAKİ TUR (kırmızı) + YENİLE (yeşil)
+	var acol := VBoxContainer.new()
+	acol.add_theme_constant_override("separation", 12)
+	acol.custom_minimum_size = Vector2(146, 0)
 	var nb := _chunky_btn("SONRAKİ\nTUR  →", T.MULT, Color.WHITE)
-	nb.custom_minimum_size = Vector2(0, 100)
+	nb.custom_minimum_size = Vector2(0, 96)
 	nb.pressed.connect(_on_next_blind)
-	lcol.add_child(nb)
+	acol.add_child(nb)
 	var can_rr: bool = state["run"]["money"] >= shop["rerollCost"]
-	var rr := _chunky_btn("↻ YENİLE\n$%d" % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
-	rr.custom_minimum_size = Vector2(0, 78)
+	var rr := _chunky_btn("YENİLE\n$%d" % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
+	rr.custom_minimum_size = Vector2(0, 74)
 	rr.disabled = not can_rr
 	rr.pressed.connect(_on_reroll)
-	lcol.add_child(rr)
-	body.add_child(lcol)
+	acol.add_child(rr)
+	trow.add_child(acol)
 
-	var rcol := VBoxContainer.new()
-	rcol.add_theme_constant_override("separation", 14)
-	rcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	body.add_child(rcol)
+	# Raflar
+	var shelves := VBoxContainer.new()
+	shelves.add_theme_constant_override("separation", 14)
+	shelves.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	shelves.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	trow.add_child(shelves)
 
-	# Satılık jokerler (dikey kart + üstte altın fiyat etiketi)
-	var jrow := HBoxContainer.new()
-	jrow.add_theme_constant_override("separation", 14)
-	for j in shop["jokers"]:
-		jrow.add_child(_shop_joker_card(j))
-	if shop["jokers"].is_empty():
-		jrow.add_child(_label("(jokerler tükendi)", 16, T.TEXT_DIM))
-	rcol.add_child(jrow)
-
-	# Paketler: harf paketi + cila paketi + kupon. Seçim aktifse harf/cila taşları.
-	var prow := HBoxContainer.new()
-	prow.add_theme_constant_override("separation", 14)
 	var bc = state["run"]["boosterChoices"]
 	var ec = state["run"].get("enhancerChoices", null)
 	var pending = state["run"].get("pendingEnhancement", null)
+	if bc != null or ec != null or pending != null:
+		shelves.add_child(_build_shop_selection(bc, ec, pending))
+	else:
+		shelves.add_child(_build_shelf(_shop_joker_slots(shop)))   # RAF 1: jokerler
+		shelves.add_child(_build_shelf(_shop_pack_slots(shop)))    # RAF 2: kupon + paketler
+
+	call_deferred("_position_shop_overlays")
+
+# ── SHOP marquee: ampul sıralı, altın "SHOP" + el-yazısı alt başlık ──
+func _build_marquee() -> Control:
+	var box := PanelContainer.new()
+	box.add_theme_stylebox_override("panel", _marquee_box())
+	var v := VBoxContainer.new()
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_theme_constant_override("separation", 2)
+	v.add_child(_bulb_row(11))
+	var s := _center(_label("SHOP", 46, Color(1.0, 0.82, 0.28), Color(0.30, 0.14, 0.03), 6))
+	s.add_theme_font_override("font", _tile_font)
+	v.add_child(s)
+	v.add_child(_center(_label("Run'ını geliştir!", 17, Color(1.0, 0.93, 0.78))))
+	v.add_child(_bulb_row(11))
+	box.add_child(v)
+	return box
+
+# Ampul sırası — küçük parlak yuvarlak noktalar (marquee kenarı hissi).
+func _bulb_row(n: int) -> Control:
+	var h := HBoxContainer.new()
+	h.alignment = BoxContainer.ALIGNMENT_CENTER
+	h.add_theme_constant_override("separation", 13)
+	for i in n:
+		var b := Panel.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(1.0, 0.95, 0.78)
+		sb.set_corner_radius_all(5)
+		sb.shadow_color = Color(1.0, 0.85, 0.4, 0.6)  # yumuşak altın ışıma
+		sb.shadow_size = 5
+		b.add_theme_stylebox_override("panel", sb)
+		b.custom_minimum_size = Vector2(8, 8)
+		h.add_child(b)
+	return h
+
+func _shop_tray_sb() -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.085, 0.16, 0.135)   # felt'ten biraz açık
+	s.set_corner_radius_all(16)
+	s.set_border_width_all(3)
+	s.border_color = Color(0.02, 0.05, 0.04)
+	s.shadow_color = Color(0, 0, 0, 0.45)
+	s.shadow_size = 8
+	s.content_margin_left = 16
+	s.content_margin_right = 16
+	s.content_margin_top = 16
+	s.content_margin_bottom = 16
+	return s
+
+# Raf — içe gömük koyu şerit (item'lar burada oturur).
+func _shelf_recess() -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0, 0, 0, 0.24)
+	s.set_corner_radius_all(12)
+	s.border_color = Color(1, 1, 1, 0.05)
+	s.set_border_width_all(1)
+	s.content_margin_left = 14
+	s.content_margin_right = 14
+	s.content_margin_top = 14
+	s.content_margin_bottom = 12
+	return s
+
+func _build_shelf(items: Array) -> Control:
+	var strip := PanelContainer.new()
+	strip.add_theme_stylebox_override("panel", _shelf_recess())
+	strip.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	for it in items:
+		row.add_child(it)
+	strip.add_child(row)
+	return strip
+
+func _shop_joker_slots(shop) -> Array:
+	var out := []
+	for j in shop["jokers"]:
+		var can_buy: bool = state["run"]["money"] >= j["cost"] and state["run"]["jokers"].size() < MAX_JOKERS
+		var tip := "%s\n[%s]" % [j["description"], j.get("rarity", "common")]
+		out.append(_priced_slot(_joker_visual(j), 150, 184, "$%d" % j["cost"], can_buy, _on_buy_joker.bind(j["id"]), tip))
+	if out.is_empty():
+		out.append(_center_v(_label("(jokerler tükendi)", 16, T.TEXT_DIM)))
+	return out
+
+func _shop_pack_slots(shop) -> Array:
+	var out := []
+	if shop["voucher"] != null:
+		out.append(_voucher_slot(shop["voucher"]))
+	var can_boost: bool = (not shop["booster"]["used"]) and state["run"]["money"] >= shop["booster"]["cost"]
+	out.append(_priced_slot(_pack_visual("HARF\nPAKETİ", "desteye +1 harf", T.GOOD),
+		150, 184, "$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
+	var enh = shop.get("enhancer", null)
+	if enh != null:
+		var can_enh: bool = (not enh["used"]) and state["run"]["money"] >= enh["cost"]
+		out.append(_priced_slot(_pack_visual("CİLA\nPAKETİ", "foil / holo / poly…", T.CHIP),
+			150, 184, "$%d" % enh["cost"], can_enh, _on_buy_enhancer, "Bir harfine kalıcı geliştirme"))
+	return out
+
+# Item görseli + üstte poke-up altın FİYAT ETİKETİ + tıklama alanı. Balatro imzası.
+func _priced_slot(card: Control, w: int, h: int, price: String, can_buy: bool, on_buy: Callable, tip: String) -> Control:
+	var root := Control.new()
+	root.custom_minimum_size = Vector2(w, h + 16)
+	card.set_anchors_preset(Control.PRESET_FULL_RECT)
+	card.offset_top = 16
+	if not can_buy:
+		card.modulate = Color(1, 1, 1, 0.5)
+	root.add_child(card)
+	var hit := Button.new()
+	hit.flat = true
+	hit.focus_mode = Control.FOCUS_NONE
+	hit.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hit.offset_top = 16
+	hit.disabled = not can_buy
+	hit.tooltip_text = tip
+	hit.pressed.connect(on_buy)
+	root.add_child(hit)
+	var tag := _price_tag(price, can_buy)
+	root.add_child(tag)
+	_shop_tags.append({"tag": tag, "slot": root})
+	return root
+
+# Fiyat etiketi — koyu yuvarlak "tab", altın $N (kıyafet fiyat etiketi gibi).
+func _price_tag(price: String, can_buy: bool) -> Control:
+	var tag := PanelContainer.new()
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.11, 0.08, 0.04)
+	s.set_corner_radius_all(7)
+	s.set_border_width_all(2)
+	s.border_color = Color(0.04, 0.02, 0.01)
+	s.shadow_color = Color(0, 0, 0, 0.5)
+	s.shadow_size = 4
+	s.shadow_offset = Vector2(0, 2)
+	s.content_margin_left = 11
+	s.content_margin_right = 11
+	s.content_margin_top = 2
+	s.content_margin_bottom = 3
+	tag.add_theme_stylebox_override("panel", s)
+	tag.z_index = 5
+	tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var l := _label(price, 22, T.BRASS if can_buy else T.TEXT_DIM, Color(0.05, 0.03, 0.0), 4)
+	l.add_theme_font_override("font", _tile_font)
+	tag.add_child(l)
+	return tag
+
+# Layout sonrası: fiyat etiketlerini slot tepesine ortala (poke-up).
+func _position_shop_overlays() -> void:
+	for e in _shop_tags:
+		var tag = e["tag"]
+		var slot = e["slot"]
+		if not is_instance_valid(tag) or not is_instance_valid(slot):
+			continue
+		tag.position = Vector2((slot.size.x - tag.size.x) * 0.5, 16.0 - tag.size.y * 0.6)
+
+# Joker kartı görseli (parşömen yüzey, nadirlik kenarı).
+func _joker_visual(j: Dictionary) -> Control:
+	var rarity: Color = T.RARITY.get(j.get("rarity", "common"), T.CARD_EDGE)
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", _item_sb(rarity, T.CARD_FACE))
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 6)
+	vb.add_child(_center(_label(j.get("icon", "?"), 50, T.INK)))
+	var nm := _center(_label(j["name"], 17, Color(0.20, 0.12, 0.04)))
+	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	nm.custom_minimum_size = Vector2(132, 0)
+	vb.add_child(nm)
+	card.add_child(vb)
+	return card
+
+# Paket görseli (foil torba hissi — renkli, parlak, krem yazı).
+func _pack_visual(title: String, sub: String, accent: Color) -> Control:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", _item_sb(accent.lightened(0.15), accent.darkened(0.12)))
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 8)
+	var t := _center(_label(title, 22, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 5))
+	t.custom_minimum_size = Vector2(132, 0)
+	vb.add_child(t)
+	vb.add_child(_center(_label(sub, 13, Color(1, 0.97, 0.88, 0.8))))
+	card.add_child(vb)
+	return card
+
+# Kupon yuvası — içe gömük mor kuyu + (yanal) etiket + bilet kartı + fiyat etiketi.
+func _voucher_slot(v: Dictionary) -> Control:
+	var can_v: bool = state["run"]["money"] >= v["cost"]
+	var well := PanelContainer.new()
+	var ws := StyleBoxFlat.new()
+	ws.bg_color = Color(0, 0, 0, 0.32)
+	ws.set_corner_radius_all(10)
+	ws.set_border_width_all(2)
+	ws.border_color = T.LILAC.darkened(0.2)
+	ws.content_margin_left = 6
+	ws.content_margin_right = 6
+	ws.content_margin_top = 6
+	ws.content_margin_bottom = 6
+	well.add_theme_stylebox_override("panel", ws)
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 4)
+	var side := _center(_label("KUPON", 12, T.LILAC.lerp(Color.WHITE, 0.2)))
+	side.custom_minimum_size = Vector2(22, 0)
+	hb.add_child(side)
+	# Bilet kartı (mor)
+	var ticket := PanelContainer.new()
+	ticket.add_theme_stylebox_override("panel", _item_sb(T.LILAC.lightened(0.2), T.LILAC.darkened(0.05)))
+	ticket.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var tv := VBoxContainer.new()
+	tv.alignment = BoxContainer.ALIGNMENT_CENTER
+	tv.add_theme_constant_override("separation", 6)
+	tv.add_child(_center(_label("◈", 38, Color(1, 0.97, 0.88))))
+	var vn := _center(_label(String(v["name"]).to_upper(), 14, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 4))
+	vn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vn.custom_minimum_size = Vector2(108, 0)
+	tv.add_child(vn)
+	ticket.add_child(tv)
+	hb.add_child(ticket)
+	well.add_child(hb)
+	return _priced_slot(well, 168, 184, "$%d" % v["cost"], can_v, _on_buy_voucher, v["description"])
+
+# Item kart stylebox — parlak sticker hissi (kalın koyu kenar, alt gölge).
+func _item_sb(border: Color, bg: Color) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = bg
+	s.set_corner_radius_all(10)
+	s.set_border_width_all(3)
+	s.border_color = border.darkened(0.25)
+	s.shadow_color = Color(0, 0, 0, 0.5)
+	s.shadow_size = 6
+	s.shadow_offset = Vector2(0, 4)
+	s.content_margin_left = 8
+	s.content_margin_right = 8
+	s.content_margin_top = 10
+	s.content_margin_bottom = 10
+	return s
+
+# Seçim alt-akışları (harf paketi / cila paketi / cila→harf) — rafın içinde gösterilir.
+func _build_shop_selection(bc, ec, pending) -> Control:
+	var strip := PanelContainer.new()
+	strip.add_theme_stylebox_override("panel", _shelf_recess())
+	strip.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var prow := HBoxContainer.new()
+	prow.add_theme_constant_override("separation", 12)
+	prow.alignment = BoxContainer.ALIGNMENT_CENTER
 	if bc != null:
 		prow.add_child(_center_v(_label("HARF\nSEÇ →", 20, T.GOOD)))
 		for ch in bc:
@@ -2680,7 +3051,6 @@ func _build_shop_ui() -> void:
 			lb.pressed.connect(_on_choose_letter.bind(ch))
 			prow.add_child(lb)
 	elif pending != null:
-		# Cila seçildi → hangi DESTE HARFİNE uygulanacağını seç (agency v2).
 		var pe = Enhancements.by_id(pending)
 		var pcol := Color(pe["color"])
 		prow.add_child(_center_v(_label("%s\nNEREYE? →" % String(pe["name"]).to_upper(), 18, pcol)))
@@ -2702,21 +3072,8 @@ func _build_shop_ui() -> void:
 		prow.add_child(_center_v(_label("CİLA\nSEÇ →", 20, T.LILAC)))
 		for eid in ec:
 			prow.add_child(_enh_choice_card(eid))
-	else:
-		var can_boost: bool = (not shop["booster"]["used"]) and state["run"]["money"] >= shop["booster"]["cost"]
-		prow.add_child(_shop_card(T.GOOD, _pack_content("HARF\nPAKETİ", "desteye +1 harf", T.GOOD),
-			"$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
-		var enh = shop.get("enhancer", null)
-		if enh != null:
-			var can_enh: bool = (not enh["used"]) and state["run"]["money"] >= enh["cost"]
-			prow.add_child(_shop_card(T.CHIP, _pack_content("CİLA\nPAKETİ", "harfe foil/holo…", T.CHIP_BADGE),
-				"$%d" % enh["cost"], can_enh, _on_buy_enhancer, "Bir harfine kalıcı geliştirme (foil/holo/poly/altın/cam)"))
-		if shop["voucher"] != null:
-			var v = shop["voucher"]
-			var can_v: bool = state["run"]["money"] >= v["cost"]
-			prow.add_child(_shop_card(T.LILAC, _pack_content(String(v["name"]).to_upper(), "kalıcı yükseltme", T.LILAC),
-				"$%d" % v["cost"], can_v, _on_buy_voucher, v["description"]))
-	rcol.add_child(prow)
+	strip.add_child(prow)
+	return strip
 
 # Geliştirme seçim kartı (Cila Paketi açılınca): sembol + isim + açıklama, tıkla → uygula.
 func _enh_choice_card(eid: String) -> Control:

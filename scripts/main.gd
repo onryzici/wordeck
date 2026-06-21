@@ -448,6 +448,16 @@ func _on_toggle_pressed(b: Button) -> void:
 			Settings.apply_video()
 	Settings.save()
 
+# Global kısayol: F11 veya Alt+Enter ile her yerden tam ekran aç/kapa (ayarla senkron).
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		var k := event as InputEventKey
+		if k.keycode == KEY_F11 or (k.keycode == KEY_ENTER and k.alt_pressed):
+			Settings.fullscreen = not Settings.fullscreen
+			Settings.apply_video()
+			Settings.save()
+			get_viewport().set_input_as_handled()
+
 # ── Müzik ──
 func _play_music() -> void:
 	music = _make_music("res://assets/sounds/alexrockbeat_this-sport_main-01_full.wav", -4.0)
@@ -457,13 +467,8 @@ func _play_music() -> void:
 func _make_music(path: String, vol: float) -> AudioStreamPlayer:
 	var p := AudioStreamPlayer.new()
 	add_child(p)
+	# Loop import seviyesinde ayarlı (edit/loop_mode=1); load() loop'lu stream döndürür.
 	var stream: AudioStream = game._load_wav(path)
-	if stream is AudioStreamWAV:
-		var w := stream as AudioStreamWAV
-		var bytes_per_frame := 4 if w.stereo else 2
-		w.loop_mode = AudioStreamWAV.LOOP_FORWARD
-		w.loop_begin = 0
-		w.loop_end = int(w.data.size() / bytes_per_frame)
 	p.stream = stream
 	p.bus = "Music"
 	p.volume_db = vol

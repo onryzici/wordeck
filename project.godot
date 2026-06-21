@@ -1,5 +1,6 @@
-; Wordeck — Türkçe kelime-roguelike (Kelimelik × Balatro), Godot 4.7
-; Yatay (landscape). Saf engine (engine/) + veri (data/) + UI (scripts/).
+; Harf Destesi — Godot 4.7 mobil proje
+; Tasarım dili: KEÇE & KEMİK (bkz. ../mobile/DESIGN.md)
+; Mantık portu kaynağı: ../src (saf engine, 96 smoke-test şartname)
 
 config_version=5
 
