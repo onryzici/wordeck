@@ -1,0 +1,3086 @@
+extends Control
+# Oyun denetleyicisi — iki sütun düzen + JUICE (yanan/dönen canlı his).
+# Mantık engine'de; bu katman okur/çizer/girişi iletir + animasyon oynatır.
+
+const State = preload("res://engine/state.gd")
+const Round = preload("res://engine/round.gd")
+const Config = preload("res://data/config.gd")
+const JokerActions = preload("res://engine/joker_actions.gd")
+const Jokers = preload("res://data/jokers.gd")
+const Shop = preload("res://engine/shop.gd")
+const Economy = preload("res://engine/economy.gd")
+const Enhancements = preload("res://data/enhancements.gd")
+const Settings = preload("res://scripts/settings.gd")
+const Bosses = preload("res://data/bosses.gd")
+const Blinds = preload("res://data/blinds.gd")
+const FlameBlock = preload("res://scripts/flame_block.gd")
+const JokerCard = preload("res://scripts/joker_card.gd")
+const TileCard = preload("res://scripts/tile_card.gd")
+const Dictionary_ = preload("res://engine/dictionary.gd")
+const Scoring = preload("res://engine/scoring.gd")
+const WordTiers = preload("res://data/word_tiers.gd")
+const LETTER_VALUES = preload("res://data/letter_values.gd")
+const T = preload("res://scripts/theme.gd")
+
+const TILE_W := 124
+const TILE_H := 166
+const TILE_GAP := 14
+const LIFT := 32
+const DECK_RESERVE := 140.0  # sağda deste yığını için ayrılan pay (el onun SOLUNA ortalanır)
+const MAX_JOKERS := 5
+
+signal request_menu  # main.gd dinler → ana menüye dön (kazan/kaybet ekranından)
+
+var state: Dictionary
+var selected_ids: Array = []
+var hand_cards_by_id: Dictionary = {}
+var tile_by_id: Dictionary = {}
+var _busy := false
+var _flame_on := false  # çip/çarpan alevi yalnız OYNA'dan sonra yanar (önizlemede değil)
+var _pulse_tween: Tween = null
+var _spark_tex: Texture2D
+var _tile_font: FontFile
+var _add_mat: CanvasItemMaterial
+var deck_holder: Control
+var _sfx: AudioStreamPlayer
+var _shuffle: AudioStream
+var _ui_sfx: AudioStreamPlayer   # kart-seçme gibi kısa UI sesleri (shuffle'ı kesmesin)
+var _card_move: AudioStream
+var _blink: AudioStream           # puan gelirken harf "blink" sesi (kullanıcı ekledi)
+var _coin_sfx: AudioStreamPlayer # puan toplama (collect) tıkları
+var _collect: AudioStream        # tek puan varış tık'ı (prosedürel coin)
+var _collect_big: AudioStream    # final toplam çan'ı (prosedürel)
+var _coin_idx := 0               # ardışık coin → yükselen perde
+
+# UI refs (sol panel)
+var blind_header: Label
+var target_label: Label
+var round_score_label: Label
+var total_label: Label
+var deck_count_label: Label
+var tier_label: Label
+var chip_value: Label
+var mult_value: Label
+var chip_seal_panel: Control
+var mult_seal_panel: Control
+var plays_value: Label
+var discards_value: Label
+var _prev_plays := -1       # -1 azalma animasyonu için son değer
+var _prev_discards := -1
+var money_label: Label
+var ante_label: Label
+var round_value: Label
+# sağ alan
+var word_label: Label
+var hint_label: Label
+var word_panel: PanelContainer  # kelime tepsisi (geçerlide yeşil parıltı)
+var boss_panel: PanelContainer  # patron turunda kısıtlama (SOL panelde)
+var boss_name_label: Label
+var boss_desc_label: Label
+var _sidebar_sb: StyleBoxFlat    # sol panel arka stylebox (palete göre renklenir)
+var _themed_sbs: Array = []      # palete göre renklenen iç paneller (stat/skor kutuları)
+var _cur_themed: Color = Color("13362b")  # son uygulanan iç-panel tonu (FELT_800)
+var _palette_tween: Tween
+var _pal_mat: ShaderMaterial
+var _pal_from: Array = []
+var _pal_to: Array = []
+var info_btn: Button
+var menu_btn: Button
+var hand_area: Control
+var joker_box: HBoxContainer
+var joker_caption: Label
+var play_btn: Button
+var disc_btn: Button
+# efekt katmanı + sarsıntı kabı
+var fx_layer: Node2D
+var shaker: Control
+
+func _ready() -> void:
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	theme = T.make_theme(T.load_font())
+	_tile_font = T.load_font()  # pixel font + outline (prompt: bold pixel everywhere)
+	_spark_tex = _make_spark_tex()
+	_add_mat = CanvasItemMaterial.new()
+	_add_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	Settings.init()  # ses bus'ları + kalıcı ayarlar (idempotent; main de çağırır)
+	_sfx = AudioStreamPlayer.new()
+	_sfx.bus = "SFX"
+	add_child(_sfx)
+	_ui_sfx = AudioStreamPlayer.new()
+	_ui_sfx.bus = "SFX"
+	add_child(_ui_sfx)
+	_coin_sfx = AudioStreamPlayer.new()
+	_coin_sfx.bus = "SFX"
+	add_child(_coin_sfx)
+	_shuffle = _load_wav("res://assets/sounds/Thin Metal Card Deck Shuffle.wav")
+	_card_move = _load_wav("res://assets/sounds/card move sound.wav")
+	_blink = _load_wav("res://assets/sounds/Short Triple Blink Notification.wav")
+	_collect = _make_tone_wav([880.0, 1320.0], 0.12, 16.0, 0.5)        # kısa coin tık'ı
+	_collect_big = _make_tone_wav([660.0, 880.0, 1100.0, 1320.0], 0.34, 7.0, 0.55)  # final çan/arp
+	Dictionary_.load_from_file("res://data/kelimeler.txt")
+	_init_run()
+	_build_ui()
+	_refresh(false, false)  # menü açıkken sessiz/statik; OYNA → enter_session() canlandırır
+
+# Taze RASTGELE seed'li yeni run kurar (her oyunda farklı kartlar). UI'ye dokunmaz.
+func _init_run() -> void:
+	randomize()
+	var seed_str := "run-%s-%d" % [str(Time.get_unix_time_from_system()), randi()]
+	state = State.create_state(seed_str)
+	Round.start_run(state)
+	for jid in Config.STARTING_JOKERS:  # başlangıç jokeri (şu an boş; denge için, bkz. sim)
+		JokerActions.add_joker_by_id(state, jid)
+
+# Menüden OYNA'ya geçince: TAZE run (yeni seed → yeni kartlar) + desteden geliş + shuffle sesi.
+func enter_session() -> void:
+	_reset_to_play_view()
+	_init_run()
+	_reset_flames()
+	_animate_jokers = true  # oyuna girişte jokerler (varsa) canlı gelsin
+	_refresh_hud()          # sol panel/joker (el SEÇ'te dağıtılır)
+	_open_blind_select()    # önce blind seçim ekranı (Balatro)
+
+# Alev değere göre yanar ama yalnız OYNA sonrası (_flame_on). Tur başında söndür.
+func _reset_flames() -> void:
+	_flame_on = false
+
+func _set_seal_flame(_seal, _on: bool) -> void:
+	pass
+
+# Alev boyunu (shader intensity) seal'in değer etiketine göre yumuşakça sürer (canlı, değer = boy).
+func _drive_seal_flame(seal) -> void:
+	if not (seal and is_instance_valid(seal) and seal.has_meta("crown")):
+		return
+	var crown: ColorRect = seal.get_meta("crown")
+	var lbl: Label = seal.get_meta("val_label")
+	if lbl == null or not is_instance_valid(lbl):
+		return
+	var val := float(lbl.text) if lbl.text.is_valid_float() else 0.0
+	var ref: float = seal.get_meta("val_ref", 90.0)
+	# Alev YALNIZCA OYNA'da (önizlemede değil). Değer varsa BELİRGİN taban (~0.5) + değerle büyür (kullanıcı:
+	# "az olunca anlamsız, biraz daha fazla yap").
+	var target := 0.0
+	if _flame_on and val > 1.0:
+		target = clampf(0.5 + (val / ref) * 0.5, 0.0, 1.0)
+	var cur: float = seal.get_meta("flame_i", 0.0)
+	cur = lerpf(cur, target, 0.12)
+	if cur < 0.02:
+		cur = 0.0  # yumuşak geçiş (ani zıplama yok)
+	seal.set_meta("flame_i", cur)
+	(crown.material as ShaderMaterial).set_shader_parameter("intensity", cur)
+
+# Dükkân/bitiş ekranından oyun görünümüne sıfırla.
+func _reset_to_play_view() -> void:
+	_shop_mode = false
+	if shop_view:
+		shop_view.visible = false
+	if blind_view:
+		blind_view.visible = false
+	if play_view:
+		play_view.visible = true
+	if deck_holder:
+		deck_holder.visible = true  # oyun alanına dönünce deste yine görünür
+	_close_overlay()
+
+# ── Düzen ──
+func _build_ui() -> void:
+	shaker = Control.new()
+	shaker.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shaker.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(shaker)
+
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 26)
+	margin.add_theme_constant_override("margin_right", 26)
+	margin.add_theme_constant_override("margin_top", 20)
+	margin.add_theme_constant_override("margin_bottom", 22)
+	shaker.add_child(margin)
+
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 22)
+	margin.add_child(cols)
+
+	cols.add_child(_build_left_panel())
+
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.add_theme_constant_override("separation", 14)
+	right.add_child(_build_joker_shelf())  # üstte HER ZAMAN (oyun + dükkân)
+	# Orta-alt alan: OYUN görünümü ↔ DÜKKÂN görünümü (Balatro: sol panel+joker kalır, orta değişir)
+	play_view = VBoxContainer.new()
+	play_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	play_view.add_theme_constant_override("separation", 14)
+	play_view.add_child(_build_word_board())
+	play_view.add_child(_build_hand_row())
+	play_view.add_child(_build_action_row())
+	right.add_child(play_view)
+	shop_view = VBoxContainer.new()
+	shop_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	shop_view.add_theme_constant_override("separation", 12)
+	shop_view.visible = false
+	right.add_child(shop_view)
+	blind_view = VBoxContainer.new()   # BLIND SEÇİM görünümü (tahta-içi, Balatro)
+	blind_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	blind_view.add_theme_constant_override("separation", 10)
+	blind_view.visible = false
+	right.add_child(blind_view)
+	cols.add_child(right)
+
+	shaker.add_child(_build_deck_stack())
+
+	fx_layer = Node2D.new()
+	add_child(fx_layer)  # her şeyin üstünde
+
+func _build_deck_stack() -> Control:
+	var holder := Control.new()
+	deck_holder = holder
+	# Kenardan DAHA UZAK (kullanıcı: "çok sağa yapışık") + biraz yukarı.
+	holder.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+	holder.offset_left = -198
+	holder.offset_top = -252
+	holder.offset_right = -78
+	holder.offset_bottom = -116
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Temiz 3 katmanlı kart-arkası yığını (köşegen kayık → derinlik); "W taşı" KALDIRILDI.
+	var top_back: Panel = null
+	for i in 3:
+		var back := Panel.new()
+		back.add_theme_stylebox_override("panel", T.card_back())
+		back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		back.offset_left = i * 5
+		back.offset_top = -i * 5
+		back.offset_right = i * 5
+		back.offset_bottom = -i * 5
+		back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		holder.add_child(back)
+		top_back = back
+	# Üst kart: ince iç altın çerçeve (sade, okunur kimlik)
+	var inner := Panel.new()
+	var isb := StyleBoxFlat.new()
+	isb.bg_color = Color(0, 0, 0, 0.0)
+	isb.set_corner_radius_all(9)
+	isb.set_border_width_all(2)
+	isb.border_color = Color(T.BRASS.r, T.BRASS.g, T.BRASS.b, 0.7)
+	inner.add_theme_stylebox_override("panel", isb)
+	inner.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	inner.offset_left = 8
+	inner.offset_top = 8
+	inner.offset_right = -8
+	inner.offset_bottom = -8
+	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_back.add_child(inner)
+	# Sayaç ROZETİ — sağ-alt köşede pirinç pill (Balatro destesi gibi "32/52")
+	var badge := PanelContainer.new()
+	var bsb := StyleBoxFlat.new()
+	bsb.bg_color = Color(0.07, 0.06, 0.05, 0.95)
+	bsb.set_corner_radius_all(11)
+	bsb.set_border_width_all(2)
+	bsb.border_color = T.BRASS
+	bsb.content_margin_left = 10
+	bsb.content_margin_right = 10
+	bsb.content_margin_top = 2
+	bsb.content_margin_bottom = 2
+	badge.add_theme_stylebox_override("panel", bsb)
+	badge.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+	badge.offset_top = -22
+	badge.offset_bottom = 16
+	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	deck_count_label = _label("0/0", 19, T.BRASS, T.OUTLINE, 3)
+	badge.add_child(deck_count_label)
+	holder.add_child(badge)
+	return holder
+
+func _label(text: String, size: int, color: Color = T.TEXT, outline: Color = T.OUTLINE, outline_size: int = -1) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	var os := outline_size if outline_size >= 0 else maxi(3, int(size / 9.0))
+	l.add_theme_constant_override("outline_size", os)
+	l.add_theme_color_override("font_outline_color", outline)
+	return l
+
+func _center(l: Label) -> Label:
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return l
+
+# Her HARFİ bağımsız dalgalandıran yazı (Balatro tarzı — biri aşağı biri yukarı).
+# RichTextLabel [wave] efektini kullanır (kendi kendine animasyonlu). Font default theme'den (m6x11).
+func _wavy_label(text: String, size: int, color: Color = T.TEXT, outline: Color = T.OUTLINE, amp: float = 8.0, freq: float = 4.0, outline_size: int = -1) -> RichTextLabel:
+	var r := RichTextLabel.new()
+	r.bbcode_enabled = true
+	r.fit_content = true
+	r.scroll_active = false
+	r.clip_contents = false  # dalga dikeyde taşınca kırpılmasın
+	r.autowrap_mode = TextServer.AUTOWRAP_OFF
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	r.add_theme_font_size_override("normal_font_size", size)
+	r.add_theme_color_override("default_color", color)
+	r.add_theme_color_override("font_outline_color", outline)
+	var os := outline_size if outline_size >= 0 else maxi(3, int(size / 9.0))
+	r.add_theme_constant_override("outline_size", os)
+	# connected=1 + düşük freq → PÜRÜZSÜZ akan dalga (connected=0 zıplamalı/tık-tık duruyordu)
+	r.text = "[center][wave amp=%d freq=%.1f connected=1]%s[/wave][/center]" % [int(amp), freq, text]
+	return r
+
+# ── SOL panel ──
+func _build_left_panel() -> Control:
+	var outer := PanelContainer.new()
+	_sidebar_sb = T.felt_panel(T.SIDEBAR, T.LINE, 18)
+	outer.add_theme_stylebox_override("panel", _sidebar_sb)  # palete göre renklenir
+	outer.custom_minimum_size = Vector2(384, 0)
+	outer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 11)
+	outer.add_child(v)
+
+	var head := PanelContainer.new()
+	head.add_theme_stylebox_override("panel", T.button_filled(T.BRASS))
+	blind_header = _center(_label("TUR 1", 30, T.INK, Color(1, 1, 1, 0.25), 0))
+	blind_header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(blind_header)
+	v.add_child(head)
+
+	target_label = _center(_label("EN AZ 60 PUAN", 19, T.BRASS))
+	target_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(target_label)
+	v.add_child(_build_boss_panel())  # patron kısıtlaması (sadece patron turunda görünür)
+
+	var score_panel := PanelContainer.new()
+	var score_sb := T.felt_panel(T.FELT_700, T.LINE, 14)
+	_themed_sbs.append(score_sb)  # palete göre renklensin
+	score_panel.add_theme_stylebox_override("panel", score_sb)
+	# TUR SKORU: etiket + sayı YAN YANA (kullanıcı).
+	var sp := HBoxContainer.new()
+	sp.alignment = BoxContainer.ALIGNMENT_CENTER
+	sp.add_theme_constant_override("separation", 12)
+	var ts_cap := _wavy_label("TUR SKORU", 17, T.TEXT_DIM, T.OUTLINE, 4.0, 5.0)
+	ts_cap.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	sp.add_child(ts_cap)
+	round_score_label = _label("0", 50, Color.WHITE, T.CHIP_BADGE, 6)
+	round_score_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	sp.add_child(round_score_label)
+	score_panel.add_child(sp)
+	v.add_child(score_panel)
+
+	# TOPLAM (çip×çarpan) — iri beyaz + kor glow (referanstaki "alev sayı")
+	total_label = _center(_label("0", 62, Color.WHITE, T.EMBER, 8))
+	total_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(total_label)
+
+	var crown_gap := Control.new()  # pixel alev tacı için boşluk (skorla görünür, yükseldi)
+	crown_gap.custom_minimum_size = Vector2(0, 34)
+	v.add_child(crown_gap)
+
+	var seals := HBoxContainer.new()
+	seals.add_theme_constant_override("separation", 8)
+	seals.alignment = BoxContainer.ALIGNMENT_CENTER
+	chip_value = _center(_label("0", 50, Color.WHITE, T.CHIP_BADGE, 6))
+	mult_value = _center(_label("1", 50, Color.WHITE, T.MULT, 6))
+	chip_seal_panel = _seal("ÇİP", chip_value, T.CHIP, Vector2(140, 86), 90.0)
+	mult_seal_panel = _seal("ÇARPAN", mult_value, T.MULT, Vector2(140, 86), 14.0)
+	seals.add_child(chip_seal_panel)
+	seals.add_child(_center(_label("×", 34, T.TEXT_DIM)))
+	seals.add_child(mult_seal_panel)
+	v.add_child(seals)
+
+	tier_label = _center(_label("—", 22, T.ORANGE))
+	tier_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(tier_label)
+
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 2)
+	v.add_child(gap)
+
+	# Alt blok — referans: solda 2 chunky buton, sağda etiket+girintili-değer panelleri.
+	var bottom := HBoxContainer.new()
+	bottom.add_theme_constant_override("separation", 10)
+	bottom.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	v.add_child(bottom)
+
+	var btns := VBoxContainer.new()
+	btns.add_theme_constant_override("separation", 10)
+	btns.custom_minimum_size = Vector2(106, 0)
+	info_btn = _chunky_btn("BİLGİ", T.MULT, Color.WHITE)
+	menu_btn = _chunky_btn("MENÜ", T.ORANGE, T.INK)
+	info_btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	menu_btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	info_btn.pressed.connect(_on_info_btn)
+	menu_btn.pressed.connect(_on_menu_btn)
+	btns.add_child(info_btn)
+	btns.add_child(menu_btn)
+	bottom.add_child(btns)
+
+	var stats := VBoxContainer.new()
+	stats.add_theme_constant_override("separation", 10)
+	stats.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stats.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	bottom.add_child(stats)
+
+	plays_value = _center(_label("4", 54, T.CHIP_BADGE, T.OUTLINE, 5))
+	discards_value = _center(_label("3", 54, T.MULT, T.OUTLINE, 5))
+	money_label = _center(_label("$4", 60, T.BRASS, T.OUTLINE, 5))
+	ante_label = _center(_label("1/8", 48, T.ORANGE, T.OUTLINE, 5))
+	round_value = _center(_label("1", 50, T.ORANGE, T.OUTLINE, 5))
+
+	var row1 := HBoxContainer.new()
+	row1.add_theme_constant_override("separation", 10)
+	row1.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	row1.add_child(_stat("HAK", plays_value))
+	row1.add_child(_stat("DEĞİŞİM", discards_value))
+	stats.add_child(row1)
+
+	var money_stat := _stat("PARA", money_label)
+	money_stat.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stats.add_child(money_stat)
+
+	var row3 := HBoxContainer.new()
+	row3.add_theme_constant_override("separation", 10)
+	row3.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	row3.add_child(_stat("BÖLÜM", ante_label))
+	row3.add_child(_stat("TUR", round_value))
+	stats.add_child(row3)
+	return outer
+
+func _stat(caption: String, value_label: Label) -> Control:
+	var p := PanelContainer.new()
+	var stat_sb := T.stat_panel()
+	_themed_sbs.append(stat_sb)  # palete göre renklensin (HAK/DEĞİŞİM/PARA/BÖLÜM/TUR)
+	p.add_theme_stylebox_override("panel", stat_sb)
+	p.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 4)
+	var cap := _wavy_label(caption, 22, T.TEXT_DIM, T.OUTLINE, 5.0, 3.0)  # akıcı dalga (her harf)
+	cap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var inset := PanelContainer.new()
+	inset.add_theme_stylebox_override("panel", T.stat_inset())
+	inset.size_flags_vertical = Control.SIZE_EXPAND_FILL  # değer kutusu paneli doldursun
+	# Değer ORTALI (konteyner ortalar) — hareket başlık dalgasından gelir, sayıya bob YOK (sağa kayma fix).
+	value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	value_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	inset.add_child(value_label)
+	v.add_child(cap)
+	v.add_child(inset)
+	p.add_child(v)
+	return p
+
+var _living_labels: Array = []   # sürekli hafif oynaşan (wobble) yazılar
+
+# Bir Control'ü "canlı" yap — sürekli hafif döner/nabız atar (Balatro yazı hissi). Zinciri döndürür.
+func _living(node: Control, strength: float = 1.0) -> Control:
+	node.set_meta("wob", strength)
+	node.set_meta("wob_phase", _living_labels.size() * 0.8)
+	_living_labels.append(node)
+	return node
+
+func _update_living_text(t: float) -> void:
+	for i in range(_living_labels.size() - 1, -1, -1):
+		var n = _living_labels[i]
+		if not is_instance_valid(n):
+			_living_labels.remove_at(i)
+			continue
+		var st: float = n.get_meta("wob", 1.0)
+		var ph: float = n.get_meta("wob_phase", 0.0)
+		# DİKEY bob (aşağı-yukarı), DÖNME YOK (kullanıcı). Taban y bir kez yakalanır.
+		if not n.has_meta("base_y"):
+			n.set_meta("base_y", n.position.y)
+		var by: float = n.get_meta("base_y")
+		var off: float = sin(t * 2.4 + ph) * 4.0 * st
+		n.position.y = by + off
+
+# Sayaç (HAK/DEĞİŞİM) azalınca üstünde "-N" belirip süzülerek kaybolur (Balatro tarzı).
+func _float_minus(anchor: Control, amount: int, color: Color) -> void:
+	if anchor == null or not is_instance_valid(anchor):
+		return
+	var lbl := _label("-%d" % amount, 34, color, T.OUTLINE, 4)
+	lbl.z_index = 60
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(lbl)
+	var c := _node_center(anchor)
+	lbl.position = c + Vector2(-14, -10)
+	lbl.pivot_offset = Vector2(14, 18)
+	lbl.modulate.a = 0.0
+	lbl.scale = Vector2(0.3, 0.3)
+	lbl.rotation = deg_to_rad(-10)
+	# Tok pop: büyüyerek belir → hafif sağa-yukarı yay → küçülüp sön (cansız düz yükselme DEĞİL)
+	var t := create_tween()
+	t.set_parallel(true)
+	t.tween_property(lbl, "scale", Vector2(1.25, 1.25), 0.16).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.tween_property(lbl, "modulate:a", 1.0, 0.1)
+	t.tween_property(lbl, "rotation", deg_to_rad(6), 0.5)
+	t.chain().tween_property(lbl, "scale", Vector2(0.85, 0.85), 0.5).set_trans(Tween.TRANS_SINE)
+	var t2 := create_tween()
+	t2.set_parallel(true)
+	t2.tween_property(lbl, "position", lbl.position + Vector2(10, -52), 0.66).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	t2.tween_property(lbl, "modulate:a", 0.0, 0.34).set_delay(0.3)
+	t2.chain().tween_callback(lbl.queue_free)
+
+func _chunky_btn(text: String, color: Color, fg: Color) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", 28)
+	b.add_theme_color_override("font_color", fg)
+	b.add_theme_stylebox_override("normal", T.button_filled(color))
+	b.add_theme_stylebox_override("hover", T.button_filled(color.lightened(0.08)))
+	b.add_theme_stylebox_override("pressed", T.button_pressed(color))
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	return b
+
+func _seal(caption: String, value_label: Label, color: Color, msize: Vector2, val_ref: float) -> Control:
+	# Kutu + üstte pixel alev TACI. Alev HER ZAMAN yanar; boyu DEĞERLE büyür (val_ref = "tam alev" eşiği).
+	var root := Control.new()
+	root.custom_minimum_size = msize
+	root.clip_contents = false
+
+	var box := Panel.new()
+	box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	box.add_theme_stylebox_override("panel", T.seal(color))
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(box)
+
+	# Pixel alev tacı — HER ZAMAN görünür; intensity (alev boyu) _process'te değere göre sürülür.
+	var crown_h := 42.0
+	var inset := 14.0
+	var crown := ColorRect.new()
+	crown.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	crown.position = Vector2(inset, -crown_h + 2.0)
+	crown.size = Vector2(msize.x - inset * 2.0, crown_h)
+	var fm := ShaderMaterial.new()
+	fm.shader = load("res://shaders/box_flame.gdshader")
+	fm.set_shader_parameter("flame_color", Color(color.r, color.g, color.b, 1.0))
+	fm.set_shader_parameter("intensity", 0.0)
+	crown.material = fm
+	root.add_child(crown)
+	root.set_meta("crown", crown)
+	root.set_meta("val_label", value_label)  # alev boyunu sürecek değer
+	root.set_meta("val_ref", val_ref)        # bu değerde alev tam boy
+	root.set_meta("flame_i", 0.0)            # başta ALEV YOK; değerle yükselir
+
+	var v := VBoxContainer.new()
+	v.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_theme_constant_override("separation", 0)
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cap := _center(_label(caption, 22, Color(1, 1, 1, 0.9)))
+	cap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(cap)
+	v.add_child(value_label)
+	root.add_child(v)
+	return root
+
+# ── SAĞ ──
+func _build_joker_shelf() -> Control:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	joker_caption = _label("JOKERLER 0/5", 20, T.TEXT_DIM)
+	box.add_child(joker_caption)
+	joker_box = HBoxContainer.new()
+	joker_box.add_theme_constant_override("separation", 12)
+	box.add_child(joker_box)
+	return box
+
+func _joker_card_sb(accent: Color) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = T.FELT_800
+	s.set_corner_radius_all(9)
+	s.set_border_width_all(3)
+	s.border_color = accent
+	s.shadow_color = Color(0, 0, 0, 0.5)
+	s.shadow_size = 6
+	s.shadow_offset = Vector2(0, 4)
+	s.content_margin_left = 5
+	s.content_margin_right = 5
+	s.content_margin_top = 5
+	s.content_margin_bottom = 5
+	return s
+
+# Joker isim plakası (üst): nadirlik renginde dolu şerit, koyu pixel yazı.
+func _joker_plate_sb(accent: Color) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = accent
+	s.corner_radius_top_left = 6
+	s.corner_radius_top_right = 6
+	s.content_margin_top = 2
+	s.content_margin_bottom = 2
+	s.content_margin_left = 3
+	s.content_margin_right = 3
+	return s
+
+# Joker amblem kutusu (orta "art" alanı): nadirlik-tonlu koyu zemin + ince çerçeve.
+func _joker_emblem_sb(accent: Color) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = accent.darkened(0.66).lerp(Color("0e271f"), 0.4)  # nadirlik ipucu taşıyan koyu zemin
+	s.corner_radius_bottom_left = 6
+	s.corner_radius_bottom_right = 6
+	s.set_border_width_all(2)
+	s.border_color = Color(accent.r, accent.g, accent.b, 0.55)
+	return s
+
+func _make_joker_slot() -> Control:
+	var p := Panel.new()
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(1, 1, 1, 0.03)  # neredeyse görünmez (soket hissi yok)
+	s.set_corner_radius_all(10)
+	s.set_border_width_all(1)
+	s.border_color = Color(1, 1, 1, 0.07)
+	p.add_theme_stylebox_override("panel", s)
+	p.custom_minimum_size = Vector2(122, 150)
+	return p
+
+func _make_joker_card(joker: Dictionary) -> Control:
+	var rarity: Color = T.RARITY.get(joker.get("rarity", "common"), T.CARD_EDGE)
+	var p := JokerCard.new()  # sürüklenebilir kart (yeniden sıralama)
+	p.add_theme_stylebox_override("panel", _joker_card_sb(rarity))
+	p.custom_minimum_size = Vector2(122, 150)
+	p.set_meta("jid", String(joker["id"]))  # skorlamada tetikleneni bulmak için
+	p.tooltip_text = "%s\n%s\n(sürükleyerek sırala)" % [joker["name"], joker["description"]]
+	# Sürükle-bırak: yalnız oyun modunda + 2+ joker varken (sıra strateji yaratır).
+	p.jid = String(joker["id"])
+	p.reorder_cb = _on_joker_reorder
+	p.preview_cb = _joker_drag_preview
+	p.draggable = not _shop_mode and state["run"]["jokers"].size() >= 2
+	p.add_child(_joker_inner(joker, rarity))
+	return p
+
+# Joker kartının iç düzeni: ÜST isim plakası (nadirlik renkli) + ORTA amblem kutusu (büyük ikon).
+# Ham emoji yerine "tasarlanmış kart" hissi. mouse_filter IGNORE → drag olayları dış karta ulaşır.
+func _joker_inner(joker: Dictionary, rarity: Color) -> Control:
+	var v := VBoxContainer.new()
+	v.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	v.add_theme_constant_override("separation", 2)
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	# Üst isim plakası (nadirlik renkli, alt kenarı koyu → "kabartma")
+	var plate := PanelContainer.new()
+	plate.add_theme_stylebox_override("panel", _joker_plate_sb(rarity))
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var nm := _center(_label(String(joker["name"]).to_upper(), 11, T.INK, Color(1, 1, 1, 0.25), 1))
+	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	nm.custom_minimum_size = Vector2(94, 0)
+	nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	plate.add_child(nm)
+	v.add_child(plate)
+
+	# Amblem "art penceresi" — KATMANLI: koyu zemin + üst ışıltı (gloss) + büyük ikon.
+	var emblem := Control.new()
+	emblem.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	emblem.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bg := Panel.new()
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.add_theme_stylebox_override("panel", _joker_emblem_sb(rarity))
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	emblem.add_child(bg)
+	var sheen := Panel.new()         # üstte yumuşak parlama (cam/gloss hissi)
+	var ss := StyleBoxFlat.new()
+	ss.bg_color = Color(1, 1, 1, 0.09)
+	ss.set_corner_radius_all(7)
+	sheen.add_theme_stylebox_override("panel", ss)
+	sheen.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	sheen.offset_left = 6
+	sheen.offset_right = -6
+	sheen.offset_top = 5
+	sheen.offset_bottom = 34
+	sheen.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	emblem.add_child(sheen)
+	var ico := _label(joker.get("icon", "?"), 52, T.TEXT)
+	ico.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ico.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ico.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	ico.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	emblem.add_child(ico)
+	v.add_child(emblem)
+	return v
+
+# Joker sürüklerken görünen önizleme (yarı saydam küçük kart, mouse'u takip eder).
+func _joker_drag_preview(jid: String) -> Control:
+	var joker = Jokers.by_id(jid)
+	var rarity: Color = T.CARD_EDGE
+	if joker != null:
+		rarity = T.RARITY.get(joker.get("rarity", "common"), T.CARD_EDGE)
+	else:
+		joker = {"name": "?", "icon": "?"}
+	var prev := PanelContainer.new()
+	prev.add_theme_stylebox_override("panel", _joker_card_sb(rarity))
+	prev.custom_minimum_size = Vector2(122, 150)
+	prev.modulate = Color(1, 1, 1, 0.9)
+	prev.rotation = deg_to_rad(-4)
+	prev.position = Vector2(-61, -75)  # imleci kartın ortasına hizala
+	prev.add_child(_joker_inner(joker, rarity))
+	return prev
+
+# Sürükle-bırak ile joker yeniden sıralama. target_jid kartına bırakıldı; after=true ise
+# onun ARKASINA, false ise ÖNÜNE taşı. JokerActions.move_joker engine'i günceller (motor saf).
+func _on_joker_reorder(from_jid: String, target_jid: String, after: bool) -> void:
+	if from_jid == target_jid:
+		return
+	var jokers: Array = state["run"]["jokers"]
+	var from := -1
+	var target := -1
+	for i in jokers.size():
+		var id := String(jokers[i]["id"])
+		if id == from_jid:
+			from = i
+		if id == target_jid:
+			target = i
+	if from == -1 or target == -1:
+		return
+	var insert_at := target + (1 if after else 0)
+	if from < insert_at:  # kaldırma sonrası indeks kayar
+		insert_at -= 1
+	if insert_at == from:
+		return
+	JokerActions.move_joker(state, from_jid, insert_at)
+	_animate_jokers = true  # yeni sırada zıplayarak yerleşsin
+	_rebuild_jokers()
+	_play_card_move()  # tık/yerleşme sesi
+
+func _build_word_board() -> Control:
+	# KELİME TAHTASI KALDIRILDI (kullanıcı: "kelime kur alanı olmasın"). Skor artık taşların
+	# üstünde + sol panelde çözülür. Etiketler eski referanslarla uyum için GİZLİ tutulur.
+	var holder := Control.new()
+	holder.visible = false
+	word_panel = PanelContainer.new()
+	hint_label = _label("", 1)
+	word_label = _label("", 1)
+	holder.add_child(word_panel)
+	holder.add_child(hint_label)
+	holder.add_child(word_label)
+	var spacer := Control.new()  # play_view'da ince dikey boşluk (joker rafı ile el arası nefes)
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	spacer.add_child(holder)
+	return spacer
+
+# Patron kutusu — SOL PANELDE (kullanıcı: banner değil sol menüde). Başka turlarda gizli.
+func _build_boss_panel() -> Control:
+	boss_panel = PanelContainer.new()
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.32, 0.06, 0.05, 0.95)
+	s.set_corner_radius_all(12)
+	s.set_border_width_all(2)
+	s.border_color = T.MULT
+	s.content_margin_left = 12
+	s.content_margin_right = 12
+	s.content_margin_top = 8
+	s.content_margin_bottom = 8
+	boss_panel.add_theme_stylebox_override("panel", s)
+	boss_panel.visible = false
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 3)
+	boss_name_label = _center(_label("PATRON", 19, T.EMBER))
+	boss_desc_label = _label("", 15, T.TEXT)
+	boss_desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	boss_desc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	v.add_child(boss_name_label)
+	v.add_child(boss_desc_label)
+	boss_panel.add_child(v)
+	return boss_panel
+
+# Kelime tepsisi stylebox — koyu inset + kalın kenar; geçerlide yeşil parıltı.
+func _board_sb(ready: bool) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.03, 0.08, 0.06, 0.9)
+	s.set_corner_radius_all(16)
+	s.set_border_width_all(3)
+	s.border_color = T.EMBER if ready else T.BRASS  # geçerlide sıcak ember (YEŞİL değil)
+	s.content_margin_left = 44
+	s.content_margin_right = 44
+	s.content_margin_top = 16
+	s.content_margin_bottom = 20
+	if ready:
+		s.shadow_color = Color(T.EMBER.r, T.EMBER.g, T.EMBER.b, 0.5)
+		s.shadow_size = 14
+	else:
+		s.shadow_color = Color(0, 0, 0, 0.4)
+		s.shadow_size = 8
+		s.shadow_offset = Vector2(0, 4)
+	return s
+
+func _build_hand_row() -> Control:
+	hand_area = Control.new()
+	hand_area.custom_minimum_size = Vector2(0, TILE_H + LIFT + 8)
+	hand_area.clip_contents = false
+	hand_area.resized.connect(func(): _layout_hand(false))
+	return hand_area
+
+func _build_action_row() -> Control:
+	var h := HBoxContainer.new()
+	h.add_theme_constant_override("separation", 20)
+	h.alignment = BoxContainer.ALIGNMENT_CENTER
+	play_btn = Button.new()
+	play_btn.text = "OYNA"
+	play_btn.add_theme_font_size_override("font_size", 38)
+	play_btn.add_theme_color_override("font_color", T.INK)
+	play_btn.add_theme_stylebox_override("normal", T.button_filled(T.BRASS))
+	play_btn.add_theme_stylebox_override("hover", T.button_filled(T.ORANGE))
+	play_btn.add_theme_stylebox_override("pressed", T.button_pressed(T.BRASS))
+	play_btn.add_theme_constant_override("outline_size", 0)
+	play_btn.custom_minimum_size = Vector2(230, 0)
+	play_btn.pressed.connect(_on_play)
+	disc_btn = Button.new()
+	disc_btn.text = "DEĞİŞTİR"
+	disc_btn.add_theme_font_size_override("font_size", 34)
+	disc_btn.add_theme_color_override("font_color", T.TEXT)
+	disc_btn.add_theme_stylebox_override("normal", T.button_outline(T.CARD_FACE))
+	var disc_hover := T.button_outline(T.ORANGE)  # OYNA gibi hover'da turuncuya döner + hafif dolgu
+	disc_hover.bg_color = Color(T.CARD_FACE.r, T.CARD_FACE.g, T.CARD_FACE.b, 0.12)
+	disc_btn.add_theme_stylebox_override("hover", disc_hover)
+	disc_btn.add_theme_color_override("font_hover_color", T.TEXT)
+	disc_btn.add_theme_stylebox_override("pressed", T.button_pressed(T.FELT_700))
+	disc_btn.custom_minimum_size = Vector2(230, 0)
+	disc_btn.pressed.connect(_on_discard)
+	# KARIŞTIR (shuffle) — OYNA ile DEĞİŞTİR arasında, logo-tarzı kare ikon buton (harfleri rastgele dizer)
+	var shuffle_btn := Button.new()
+	shuffle_btn.text = "🔀"
+	shuffle_btn.add_theme_font_size_override("font_size", 34)
+	shuffle_btn.add_theme_color_override("font_color", T.INK)
+	shuffle_btn.add_theme_stylebox_override("normal", T.button_filled(T.LILAC))
+	shuffle_btn.add_theme_stylebox_override("hover", T.button_filled(T.LILAC.lightened(0.1)))
+	shuffle_btn.add_theme_stylebox_override("pressed", T.button_pressed(T.LILAC))
+	shuffle_btn.add_theme_constant_override("outline_size", 0)
+	shuffle_btn.custom_minimum_size = Vector2(78, 78)
+	shuffle_btn.tooltip_text = "Harfleri karıştır"
+	shuffle_btn.pressed.connect(_on_shuffle)
+	h.add_child(play_btn)
+	h.add_child(shuffle_btn)
+	h.add_child(disc_btn)
+	return h
+
+# Harfleri RASTGELE diz (kozmetik — seçim sırası kelimeyi belirler, el sırası değil). + shuffle sesi.
+func _on_shuffle() -> void:
+	if _busy:
+		return
+	var hand: Array = state["round"]["hand"]
+	# Fisher-Yates (run rng ile — determinizm korunur)
+	var rng = state["run"]["rng"]
+	for i in range(hand.size() - 1, 0, -1):
+		var j := int(rng.next() * (i + 1))
+		var tmp = hand[i]
+		hand[i] = hand[j]
+		hand[j] = tmp
+	# hand_area çocuk sırasını state'e göre diz → _layout_hand yeni sırayla yerleştirir
+	for i in hand.size():
+		var id := int(hand[i]["id"])
+		if tile_by_id.has(id):
+			hand_area.move_child(tile_by_id[id], i)
+	_play_shuffle()
+	_layout_hand(true)
+
+# ── Kemik taş ──
+func _make_tile(card: Dictionary) -> Control:
+	var tile := TileCard.new()  # sürüklenebilir (seçiliyken kelime sırasını değiştirir)
+	tile.custom_minimum_size = Vector2(TILE_W, TILE_H)
+	tile.size = Vector2(TILE_W, TILE_H)
+	tile.pivot_offset = Vector2(TILE_W, TILE_H) / 2.0
+	tile.set_meta("card_id", int(card["id"]))
+	tile.set_meta("selected", false)
+	tile.card_id = int(card["id"])
+	tile.reorder_cb = _on_tile_reorder
+	tile.preview_cb = _tile_drag_preview
+
+	# visual = idle 3D float burada (layout/seçim dış tile'da, idle iç visual'da → çakışmaz)
+	var visual := Control.new()
+	visual.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	visual.pivot_offset = Vector2(TILE_W, TILE_H) / 2.0
+	visual.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tile.add_child(visual)
+	tile.set_meta("visual", visual)
+
+	var face := Panel.new()
+	face.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	face.add_theme_stylebox_override("panel", T.bone_tile())
+	face.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	visual.add_child(face)
+
+	var sheen := Panel.new()
+	sheen.add_theme_stylebox_override("panel", T.tile_sheen())
+	sheen.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	sheen.offset_left = 8
+	sheen.offset_right = -8
+	sheen.offset_top = 8
+	sheen.offset_bottom = TILE_H * 0.42
+	sheen.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	visual.add_child(sheen)
+
+	var letter := _label(card["char"], 84, T.INK, Color("c9b68c", 0.9), 5)
+	letter.add_theme_font_override("font", _tile_font)  # pixel taş fontu + açık kontur (kabartma)
+	letter.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	letter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	letter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	letter.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	visual.add_child(letter)
+
+	var val := str(LETTER_VALUES.chips(card["char"]))
+	visual.add_child(_corner_pip(val, true))
+	visual.add_child(_corner_pip(val, false))
+
+	# Geliştirme (foil/holo/poly/altın/cam) — renkli kenar + köşe sembolü
+	var enh = card.get("enhancements", [])
+	if not enh.is_empty():
+		var e = Enhancements.by_id(enh[enh.size() - 1])
+		var ecol := Color(e["color"])
+		var glow := Panel.new()
+		glow.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		var gs := StyleBoxFlat.new()
+		gs.bg_color = Color(ecol.r, ecol.g, ecol.b, 0.10)  # hafif tint
+		gs.set_corner_radius_all(14)
+		gs.set_border_width_all(4)
+		gs.border_color = ecol
+		glow.add_theme_stylebox_override("panel", gs)
+		glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		visual.add_child(glow)
+		var badge := _label(e["symbol"], 30, ecol, T.OUTLINE, 4)
+		badge.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+		badge.offset_left = -40
+		badge.offset_top = 3
+		badge.offset_right = -6
+		badge.offset_bottom = 40
+		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		visual.add_child(badge)
+
+	tile.gui_input.connect(_on_tile_input.bind(int(card["id"])))
+	return tile
+
+# Sürekli hafif 3D float — kartlar "yaşıyor" hissi (Balatro tarzı).
+func _process(_delta: float) -> void:
+	var t := Time.get_ticks_msec() / 1000.0
+	_update_living_text(t)  # başlık/önemli yazılar sürekli hafif oynaşır (Balatro hissi)
+	_drive_seal_flame(chip_seal_panel)   # alev boyu = ÇİP değeri (canlı)
+	_drive_seal_flame(mult_seal_panel)   # alev boyu = ÇARPAN değeri
+	# Joker kartları sürekli hafif sallanır (yaşıyor hissi; rotasyon → pop-in scale'iyle çakışmaz)
+	if joker_box:
+		var jcards := joker_box.get_children()
+		for i in jcards.size():
+			var jc: Control = jcards[i]
+			if not jc.has_meta("jid"):
+				continue  # boş yuva sallanmaz
+			if jc.size != Vector2.ZERO:
+				jc.pivot_offset = jc.size * 0.5
+			jc.rotation = sin(t * 1.5 + i * 0.85) * deg_to_rad(2.6)
+	if hand_area == null:
+		return
+	var tiles := hand_area.get_children()
+	for i in tiles.size():
+		var tile: Control = tiles[i]
+		var vis = tile.get_meta("visual", null)
+		if vis == null:
+			continue
+		if tile.get_meta("selected", false):
+			vis.position.y = lerp(vis.position.y, 0.0, 0.25)
+			vis.rotation = lerp(vis.rotation, 0.0, 0.25)
+		else:
+			var ph := i * 0.65
+			vis.position.y = sin(t * 1.7 + ph) * 4.5
+			vis.rotation = sin(t * 1.1 + ph) * deg_to_rad(2.2)
+
+func _corner_pip(val: String, top_left: bool) -> Control:
+	var c := Control.new()
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var box := Vector2(44, 56)
+	var l := _label(val, 32, T.BRASS)
+	l.add_theme_font_override("font", _tile_font)
+	l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.add_child(l)
+	if top_left:
+		c.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+		c.offset_left = 6
+		c.offset_top = 4
+		c.offset_right = 6 + box.x
+		c.offset_bottom = 4 + box.y
+	else:
+		c.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+		c.offset_left = -6 - box.x
+		c.offset_top = -4 - box.y
+		c.offset_right = -6
+		c.offset_bottom = -4
+		c.pivot_offset = box / 2.0
+		c.rotation = PI  # 180° çevrik (kart gibi)
+	return c
+
+func _on_tile_input(event: InputEvent, card_id: int) -> void:
+	if _busy:
+		return
+	var tile = tile_by_id.get(card_id, null)
+	if tile == null:
+		return
+	var is_btn: bool = (event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT) \
+		or event is InputEventScreenTouch
+	if not is_btn:
+		return
+	if event.pressed:
+		tile.drag_started = false  # yeni basış → bayrağı sıfırla
+	else:  # bırakma → sürükleme OLMADIYSA seç/bırak (sürükleme reorder yaptı)
+		if tile.drag_started:
+			tile.drag_started = false
+			return
+		_toggle_select(card_id)
+
+func _toggle_select(card_id: int) -> void:
+	_flame_on = false  # yeni kelime kurmaya başladın → alev söner (sonraki OYNA'da yine yanar)
+	if selected_ids.has(card_id):
+		selected_ids.erase(card_id)
+		tile_by_id[card_id].set_meta("selected", false)
+	else:
+		selected_ids.append(card_id)
+		tile_by_id[card_id].set_meta("selected", true)
+		_pop(tile_by_id[card_id], 1.08)
+	_play_card_move()
+	_layout_hand(true)
+	_update_word_display()
+
+# Kelime bölgesindeki taşı sürükle-bırakla yeniden sırala (kelime harf sırasını değiştirir).
+func _on_tile_reorder(from_id: int, target_id: int, after: bool) -> void:
+	if from_id == target_id:
+		return
+	var fi := selected_ids.find(from_id)
+	var ti := selected_ids.find(target_id)
+	if fi == -1 or ti == -1:
+		return
+	selected_ids.remove_at(fi)
+	ti = selected_ids.find(target_id)  # kaldırma sonrası indeks
+	var insert_at := ti + (1 if after else 0)
+	selected_ids.insert(insert_at, from_id)
+	_play_card_move()
+	_layout_hand(true)
+	_update_word_display()
+
+# Taş sürüklerken görünen önizleme (yarı saydam kemik taş + harf, mouse'u takip eder).
+func _tile_drag_preview(id: int) -> Control:
+	var card = hand_cards_by_id.get(id, null)
+	var ch: String = String(card["char"]) if card != null else "?"
+	var prev := Control.new()
+	prev.custom_minimum_size = Vector2(TILE_W, TILE_H)
+	prev.size = Vector2(TILE_W, TILE_H)
+	prev.modulate = Color(1, 1, 1, 0.9)
+	prev.rotation = deg_to_rad(-4)
+	prev.position = -Vector2(TILE_W, TILE_H) / 2.0  # imleci ortaya hizala
+	var face := Panel.new()
+	face.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	face.add_theme_stylebox_override("panel", T.bone_tile())
+	prev.add_child(face)
+	var letter := _label(ch, 84, T.INK, Color("c9b68c", 0.9), 5)
+	letter.add_theme_font_override("font", _tile_font)
+	letter.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	letter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	letter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	prev.add_child(letter)
+	return prev
+
+func _play_card_move() -> void:
+	if _ui_sfx and _card_move:
+		_ui_sfx.stream = _card_move
+		_ui_sfx.play()
+
+# ── El yerleşimi + dağıtım animasyonu ──
+func _rebuild_hand(deal_in: bool, sound: bool = false) -> void:
+	for c in hand_area.get_children():
+		c.queue_free()
+	tile_by_id.clear()
+	hand_cards_by_id.clear()
+	for card in state["round"]["hand"]:
+		hand_cards_by_id[int(card["id"])] = card
+		var tile := _make_tile(card)
+		hand_area.add_child(tile)
+		tile_by_id[int(card["id"])] = tile
+	# Kabın GENİŞLİĞİ OTURANA kadar bekle (iki kare sabit) — yoksa _deal_in yanlış/sağdaki
+	# hedefi yakalıyor ve taşlar sağda stack'leniyordu (bug). Sabitlik kontrolü tek kareden sağlam.
+	await get_tree().process_frame
+	var prev_w := -1.0
+	var guard := 0
+	while guard < 20:
+		if not is_inside_tree():
+			return
+		var w := hand_area.size.x
+		if w >= float(TILE_W) and absf(w - prev_w) < 0.5:
+			break  # genişlik iki kare aynı → oturdu
+		prev_w = w
+		await get_tree().process_frame
+		guard += 1
+	_layout_hand(false)
+	if deal_in:
+		_deal_in(sound)
+
+const WORD_ZONE_DY := 326.0  # seçili taşlar bu kadar YUKARI çıkar (biraz daha yukarı — kullanıcı)
+
+func _layout_hand(animate: bool) -> void:
+	var tiles := hand_area.get_children()
+	if tiles.is_empty():
+		return
+	var avail := hand_area.size.x
+	if avail < float(TILE_W):
+		return  # kap hazır değil → bozuk yerleşim yapma
+	var usable := avail - DECK_RESERVE  # sağdaki desteye yer bırak
+	if usable < float(TILE_W):
+		usable = avail
+	# SEÇİLİ taşları (kelime SIRASINA göre) üst/orta bölgeye, kalanları alt sıraya ayır.
+	var sel_tiles := []
+	for id in selected_ids:
+		if tile_by_id.has(id) and tile_by_id[id] in tiles:
+			sel_tiles.append(tile_by_id[id])
+	var un_tiles := []
+	for t in tiles:
+		if not (t in sel_tiles):
+			un_tiles.append(t)
+	_place_row(un_tiles, usable, float(LIFT), animate, false, TILE_GAP)            # alt: el (deste'ye yer)
+	_place_row(sel_tiles, avail, float(LIFT) - WORD_ZONE_DY, animate, true, float(TILE_GAP))  # üst: kelime (tam ortalı, normal aralık)
+
+# Bir taş sırasını yatayda ortala + yerleştir. center_w = ortalama genişliği, gap = taşlar arası boşluk.
+func _place_row(row: Array, center_w: float, y: float, animate: bool, selected: bool, gap: float) -> void:
+	var n := row.size()
+	if n == 0:
+		return
+	var step := float(TILE_W) + gap
+	if n > 1 and (n - 1) * step + TILE_W > center_w:
+		step = (center_w - TILE_W) / (n - 1)
+	var total := (n - 1) * step + TILE_W
+	var start_x := maxf(0.0, (center_w - total) / 2.0)
+	for i in n:
+		var tile = row[i]
+		tile.can_drag = selected  # yalnız kelime bölgesindeki taşlar sürüklenir
+		var target := Vector2(start_x + i * step, y)
+		var rot: float = deg_to_rad(-2.0) if selected else 0.0
+		if animate:
+			var tw := create_tween().set_parallel(true)
+			tw.tween_property(tile, "position", target, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			tw.tween_property(tile, "rotation", rot, 0.2)
+		else:
+			tile.position = target
+			tile.rotation = rot
+
+func _deal_in(play_sound: bool) -> void:
+	var tiles := hand_area.get_children()
+	if tiles.is_empty():
+		return
+	# Kaynak = deste yığını (sağ-alt) → hand_area yerel koordinatı (kartlar desteden çıkar gibi).
+	var src := Vector2(hand_area.size.x, hand_area.size.y * 0.5)
+	if deck_holder and is_instance_valid(deck_holder):
+		src = hand_area.get_global_transform().affine_inverse() * _node_center(deck_holder)
+	for i in tiles.size():
+		var tile: Control = tiles[i]
+		var target := tile.position
+		tile.position = src - tile.size * 0.5
+		tile.modulate.a = 0.0
+		tile.scale = Vector2(0.45, 0.45)
+		tile.rotation = deg_to_rad(18.0)
+		var delay := i * 0.06
+		var tw := create_tween().set_parallel(true)
+		tw.tween_property(tile, "position", target, 0.42).set_delay(delay).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(tile, "modulate:a", 1.0, 0.2).set_delay(delay)
+		tw.tween_property(tile, "rotation", 0.0, 0.36).set_delay(delay)
+		tw.tween_property(tile, "scale", Vector2.ONE, 0.36).set_delay(delay).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	if play_sound:
+		_play_shuffle()
+
+func _play_shuffle() -> void:
+	if _sfx and _shuffle:
+		_sfx.stream = _shuffle
+		_sfx.play()
+
+# Oynama sonrası DIFF refill: oynanan taşlar sağa süzülür, kalanlar durur, SADECE yeni taşlar
+# desteden dağıtılır (kullanıcı: "hepsi tekrar gelmiyor, adeti kadar kart geliyor").
+func _refill_hand(played_tiles: Array, sound: bool) -> void:
+	# 1) Oynanan taşları el alanından AYIR (layout'a karışmasın) → sağa süzüp sil.
+	for t in played_tiles:
+		if not is_instance_valid(t):
+			continue
+		var gp: Vector2 = t.global_position
+		if t.get_parent() == hand_area:
+			hand_area.remove_child(t)
+			add_child(t)
+			t.global_position = gp
+		t.z_index = 4
+		var tw := create_tween()
+		tw.set_parallel(true)
+		tw.tween_property(t, "position:x", t.position.x + 560.0, 0.44).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tw.tween_property(t, "modulate:a", 0.0, 0.4)
+		tw.tween_property(t, "rotation", deg_to_rad(16.0), 0.44)
+		tw.chain().tween_callback(t.queue_free)
+	# 2) tile_by_id'den state.hand'de OLMAYANLARI (oynananlar) temizle.
+	var hand_ids := {}
+	for card in state["round"]["hand"]:
+		hand_ids[int(card["id"])] = true
+	for id in tile_by_id.keys():
+		if not hand_ids.has(id):
+			tile_by_id.erase(id)
+			hand_cards_by_id.erase(id)
+	# 3) Diff: kalan taşları TUT, yeni kartlar için taş oluştur; çocuk sırasını state'e göre diz.
+	var new_tiles := []
+	var ordered := []
+	for card in state["round"]["hand"]:
+		var id := int(card["id"])
+		var tile: Control
+		if tile_by_id.has(id):
+			tile = tile_by_id[id]
+		else:
+			tile = _make_tile(card)
+			hand_area.add_child(tile)
+			tile_by_id[id] = tile
+			hand_cards_by_id[id] = card
+			new_tiles.append(tile)
+		ordered.append(tile)
+	for i in ordered.size():
+		hand_area.move_child(ordered[i], i)
+	await get_tree().process_frame
+	_layout_hand_keep(new_tiles, sound)
+
+# _layout_hand'in diff versiyonu: kalan taşlar yeni yerine KAYAR; yeni taşlar DESTEDEN dağıtılır.
+func _layout_hand_keep(new_tiles: Array, sound: bool) -> void:
+	var tiles := hand_area.get_children()
+	var n := tiles.size()
+	if n == 0:
+		return
+	var avail := hand_area.size.x
+	if avail < float(TILE_W):
+		return
+	var usable := avail - DECK_RESERVE
+	if usable < float(TILE_W):
+		usable = avail
+	var step := float(TILE_W + TILE_GAP)
+	if n > 1 and (n - 1) * step + TILE_W > usable:
+		step = (usable - TILE_W) / (n - 1)
+	var total := (n - 1) * step + TILE_W
+	var start_x := maxf(0.0, (usable - total) / 2.0)
+	var base_y := float(LIFT)
+	var src := Vector2(hand_area.size.x, hand_area.size.y * 0.5)
+	if deck_holder and is_instance_valid(deck_holder):
+		src = hand_area.get_global_transform().affine_inverse() * _node_center(deck_holder)
+	var dealt := false
+	for i in n:
+		var tile = tiles[i]
+		tile.can_drag = false  # oynama sonrası seçim yok → sürükleme kapalı
+		var target := Vector2(start_x + i * step, base_y)  # hep taban
+		if tile in new_tiles:
+			tile.position = src - tile.size * 0.5
+			tile.modulate = Color(1, 1, 1, 0.0)
+			tile.scale = Vector2(0.45, 0.45)
+			tile.rotation = deg_to_rad(18.0)
+			var d := i * 0.05
+			var tw := create_tween()
+			tw.set_parallel(true)
+			tw.tween_property(tile, "position", target, 0.42).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			tw.tween_property(tile, "modulate:a", 1.0, 0.2).set_delay(d)
+			tw.tween_property(tile, "rotation", 0.0, 0.36).set_delay(d)
+			tw.tween_property(tile, "scale", Vector2.ONE, 0.36).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			dealt = true
+		else:
+			var tw := create_tween()
+			tw.set_parallel(true)
+			tw.tween_property(tile, "position", target, 0.24).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			tw.tween_property(tile, "rotation", 0.0, 0.2)
+	if dealt and sound:
+		_play_shuffle()
+
+# WAV'ı import'suz yükle (RIFF parse → AudioStreamWAV). Fontlar/sözlük gibi ham bayttan.
+func _load_wav(path: String) -> AudioStream:
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.size() < 44:
+		push_error("WAV açılamadı: " + path)
+		return null
+	var num_channels := 1
+	var sample_rate := 44100
+	var bits := 16
+	var data := PackedByteArray()
+	var pos := 12
+	while pos + 8 <= bytes.size():
+		var cid := bytes.slice(pos, pos + 4).get_string_from_ascii()
+		var csize := bytes.decode_u32(pos + 4)
+		var body := pos + 8
+		if cid == "fmt ":
+			num_channels = bytes.decode_u16(body + 2)
+			sample_rate = bytes.decode_u32(body + 4)
+			bits = bytes.decode_u16(body + 14)
+		elif cid == "data":
+			data = bytes.slice(body, mini(body + csize, bytes.size()))
+		pos = body + csize + (csize & 1)
+	var s := AudioStreamWAV.new()
+	s.data = data
+	s.format = AudioStreamWAV.FORMAT_16_BITS if bits == 16 else AudioStreamWAV.FORMAT_8_BITS
+	s.mix_rate = sample_rate
+	s.stereo = num_channels == 2
+	return s
+
+# Prosedürel "coin/collect" sesi: verilen frekansları sırayla çalan, üstel sönümlü kısa ton.
+# freqs: ardışık ton dizisi (yükselen → coin/arp hissi); decay: sönüm hızı; amp: genlik.
+func _make_tone_wav(freqs: Array, dur: float, decay: float, amp: float) -> AudioStreamWAV:
+	var rate := 44100
+	var n := int(rate * dur)
+	var seg := maxi(1, n / max(1, freqs.size()))
+	var data := PackedByteArray()
+	data.resize(n * 2)  # 16-bit mono
+	for i in n:
+		var t := float(i) / rate
+		var fi := mini(freqs.size() - 1, i / seg)
+		var f: float = freqs[fi]
+		var env: float = exp(-t * decay)
+		var sample: float = sin(TAU * f * t) * env * amp
+		data.encode_s16(i * 2, int(clamp(sample, -1.0, 1.0) * 32767.0))
+	var w := AudioStreamWAV.new()
+	w.data = data
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = rate
+	w.stereo = false
+	return w
+
+func _play_collect(stream: AudioStream, pitch: float) -> void:
+	if _coin_sfx and stream:
+		_coin_sfx.stream = stream
+		_coin_sfx.pitch_scale = pitch
+		_coin_sfx.play()
+
+# ── Kelime / geçerlilik / canlı önizleme ──
+func _current_word() -> String:
+	var w := ""
+	for id in selected_ids:
+		if hand_cards_by_id.has(id):
+			w += hand_cards_by_id[id]["char"]
+	return w
+
+func _selected_cards() -> Array:
+	var out := []
+	for id in selected_ids:
+		if hand_cards_by_id.has(id):
+			out.append(hand_cards_by_id[id])
+	return out
+
+func _is_current_valid() -> bool:
+	var cards := _selected_cards()
+	if cards.size() < state["config"]["minWordLength"]:
+		return false
+	if not Dictionary_.is_valid_word(_current_word(), state["config"]["minWordLength"]):
+		return false
+	var boss = state["round"].get("boss", null)
+	if boss != null and boss.has("validate"):
+		if not boss["validate"].call(cards, state)["ok"]:
+			return false
+	return true
+
+# Kelime tahtası YOK → geçerlilik geri bildirimi OYNA butonunda (yeşil parlar + nabız) +
+# canlı çip/çarpan önizlemesi sol panelde. Seçili taşlar geçerlide yeşil ışıldar.
+func _update_word_display() -> void:
+	var cards := _selected_cards()
+	if _is_current_valid():
+		var res := Scoring.score_word(state, cards, true)
+		chip_value.text = str(res["chips"])
+		mult_value.text = _fmt(res["mult"])
+		total_label.text = str(res["score"])
+		tier_label.text = "%s  ·  ×%s" % [res["tier"]["label"], _fmt(res["tier"]["mult"])]
+		_set_play_ready(true)
+		_start_pulse()
+	else:
+		chip_value.text = "0"
+		mult_value.text = "1"
+		total_label.text = "0"
+		if cards.size() > 0:
+			var t := WordTiers.tier_for(cards.size())
+			tier_label.text = "%s  ·  ×%s" % [t["label"], _fmt(t["mult"])]
+		else:
+			tier_label.text = "—"
+		_set_play_ready(false)
+		_stop_pulse()
+	_tint_selected_tiles()
+
+# OYNA butonu: geçerli kelimede YEŞİL (hazır), değilse pirinç (normal).
+func _set_play_ready(ready: bool) -> void:
+	if play_btn == null:
+		return
+	if ready:
+		play_btn.add_theme_stylebox_override("normal", T.button_filled(T.GOOD))
+		play_btn.add_theme_stylebox_override("hover", T.button_filled(T.GOOD.lightened(0.1)))
+	else:
+		play_btn.add_theme_stylebox_override("normal", T.button_filled(T.BRASS))
+		play_btn.add_theme_stylebox_override("hover", T.button_filled(T.ORANGE))
+
+# Seçili taşları geçerli kelimede hafif yeşile boyar (görsel onay).
+func _tint_selected_tiles() -> void:
+	var valid := _is_current_valid()
+	for id in tile_by_id:
+		var tile = tile_by_id[id]
+		if not is_instance_valid(tile):
+			continue
+		var sel: bool = tile.get_meta("selected", false)
+		var target := Color(0.7, 1.1, 0.8) if (sel and valid) else Color.WHITE
+		tile.modulate = tile.modulate.lerp(target, 1.0)
+
+func _start_pulse() -> void:
+	_stop_pulse()
+	play_btn.pivot_offset = play_btn.size / 2.0
+	_pulse_tween = create_tween().set_loops()
+	_pulse_tween.tween_property(play_btn, "scale", Vector2(1.05, 1.05), 0.45).set_trans(Tween.TRANS_SINE)
+	_pulse_tween.tween_property(play_btn, "scale", Vector2.ONE, 0.45).set_trans(Tween.TRANS_SINE)
+
+func _stop_pulse() -> void:
+	if _pulse_tween:
+		_pulse_tween.kill()
+		_pulse_tween = null
+	if play_btn:
+		play_btn.scale = Vector2.ONE
+
+func _flash(color: Color) -> void:
+	# Geçersiz oynama denemesi → OYNA butonu kırmızı yanıp söner.
+	if play_btn == null:
+		return
+	play_btn.add_theme_stylebox_override("normal", T.button_filled(color))
+	var tw := create_tween()
+	tw.tween_interval(0.22)
+	tw.tween_callback(_update_word_display)
+
+# ── Aksiyonlar ──
+func _on_play() -> void:
+	if _busy:
+		return
+	if not _is_current_valid():
+		_flash(T.MULT)
+		return
+	var fired: Array = []
+	for id in selected_ids:
+		if tile_by_id.has(id):
+			fired.append(tile_by_id[id])
+	var prev_score: int = state["round"]["score"]
+	var res := Round.play_word(state, selected_ids.duplicate())
+	if not res.get("ok", false):
+		_flash(T.MULT)
+		return
+	selected_ids.clear()
+	_busy = true
+	_flame_on = true  # OYNA'ya basıldı → alev artık yanabilir (değere göre)
+	_stop_pulse()
+	_set_buttons(false)
+	await _score_sequence(res, fired, prev_score)
+	# Skor alındı → çip/çarpan alev tacı YANSIN (yeni tura kadar durur)
+	_set_seal_flame(chip_seal_panel, true)
+	_set_seal_flame(mult_seal_panel, true)
+	_busy = false
+	_set_buttons(true)
+	if state["round"]["status"] == "won":
+		hint_label.text = "TUR GEÇİLDİ!"
+		word_label.text = "✦"
+		word_label.add_theme_color_override("font_color", T.EMBER)
+		await get_tree().create_timer(0.45).timeout
+		_open_cash_out()
+	elif state["run"]["status"] == "lost":
+		await get_tree().create_timer(0.35).timeout
+		_open_lose()
+	else:
+		# Oynanan taşlar sağa süzülür + SADECE kullanılan kadar yeni taş desteden gelir (kalanlar durur)
+		_refresh_hud()  # sol panel/joker/sayaç güncelle (el'e dokunma — _refill_hand yapar)
+		await _refill_hand(fired, true)
+		_update_word_display()
+
+func _on_discard() -> void:
+	if _busy:
+		return
+	if selected_ids.is_empty():
+		_flash(T.MULT)
+		return
+	var res := Round.discard_cards(state, selected_ids.duplicate())
+	if not res.get("ok", false):
+		_flash(T.MULT)
+		return
+	selected_ids.clear()
+	_refresh(true, true)
+
+func _set_buttons(on: bool) -> void:
+	play_btn.disabled = not on
+	disc_btn.disabled = not on
+
+# ── JUICE: sıralı skor çözümü ──
+func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
+	chip_value.text = "0"
+	mult_value.text = "1"
+	_coin_idx = 0
+	var li := 0
+	var run_chip := 0
+	for step in res["timeline"]:
+		var gain := int(step["chips"]) - run_chip
+		run_chip = int(step["chips"])
+		match step["kind"]:
+			"letter":
+				if li < fired.size() and is_instance_valid(fired[li]):
+					_fire_tile(fired[li], gain)
+				li += 1
+				_count_label(chip_value, int(step["chips"]), 0.18)
+				mult_value.text = _fmt(step["mult"])
+				_pop(chip_seal_panel, 1.1)
+				await get_tree().create_timer(0.4).timeout  # daha YAVAŞ (kullanıcı: çok hızlı)
+			"tier":
+				_count_label(chip_value, int(step["chips"]), 0.2)
+				_pop(chip_seal_panel, 1.12)
+				await get_tree().create_timer(0.36).timeout
+			_:
+				# Joker/patron adımı — hangi joker tetiklendi + ne kattı (pill ile)
+				var jcard := _find_joker_card(String(step.get("id", "")))
+				var src_pos: Vector2
+				if jcard != null:
+					_pop(jcard, 1.22)
+					src_pos = _node_center(jcard) + Vector2(0, -10)
+				else:
+					src_pos = _node_center(mult_seal_panel)
+				for op in step["ops"]:
+					_float_op_pill(src_pos, _op_value(op), _op_label(op), _op_color(op))
+				_count_label(chip_value, int(step["chips"]), 0.1)
+				mult_value.text = _fmt(step["mult"])
+				_pop(mult_seal_panel, 1.18)
+				_ember_burst(_node_center(mult_seal_panel), 14, 2.8)
+				await get_tree().create_timer(0.46).timeout  # joker adımı daha belirgin/yavaş
+	# Final: çip × çarpan patlaması
+	chip_value.text = str(res["chips"])
+	mult_value.text = _fmt(res["mult"])
+	_pop(chip_seal_panel, 1.16)
+	_pop(mult_seal_panel, 1.16)
+	var mid := _node_center(total_label)
+	var big: int = clampi(int(res["score"]) / 18 + 26, 26, 96)
+	_flash_ring(mid, 8.0, Color(T.EMBER.r, T.EMBER.g, T.EMBER.b, 0.8))
+	_ember_burst(mid, big, 4.0)
+	_shake(min(11.0, 4.0 + res["score"] / 80.0), 0.38)
+	_count_label(total_label, int(res["score"]), 0.45)
+	_pop(total_label, 1.42)  # daha tok patlama
+	_play_collect(_collect_big, 1.0)  # final toplam çanı
+	# (Kutlama yazısı KALDIRILDI — kullanıcı "kötü duruyor" dedi; _praise_banner artık çağrılmıyor)
+	await get_tree().create_timer(0.35).timeout
+	# TUR SKORU: skor "akarak" eklenir (count-up) + tok pop + kısa kor parlaması
+	_count_label(round_score_label, int(state["round"]["score"]), 0.5)
+	_pop(round_score_label, 1.45)
+	_flash_color(round_score_label, T.EMBER, 0.45)
+	_ember_burst(_node_center(round_score_label), 8, 2.6)
+	await get_tree().create_timer(0.5).timeout
+
+func _fire_tile(tile: Control, gain: int) -> void:
+	var tw := create_tween()
+	tw.tween_property(tile, "scale", Vector2(1.22, 1.22), 0.08).set_trans(Tween.TRANS_BACK)
+	tw.tween_property(tile, "scale", Vector2.ONE, 0.12)
+	_ember_burst(_node_center(tile), 12, 3.0)
+	if _ui_sfx and _blink:           # harf "blink" sesi (kullanıcı ekledi) — her puan gelişinde
+		_ui_sfx.stream = _blink
+		_ui_sfx.play()
+	if gain > 0:
+		_float_gain_on_tile(tile, gain)  # +N taşın TEPESİNDE belirir (sola uçmaz)
+
+# Oynanan taşın TEPESİNDE Balatro tarzı BÜYÜK "+N" (beyaz, kalın koyu kontur) + küçük mavi karo aksanı.
+func _float_gain_on_tile(tile: Control, gain: int) -> void:
+	if not is_instance_valid(tile):
+		return
+	var holder := Control.new()
+	holder.z_index = 46
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(holder)
+	var top := _node_center(tile) + Vector2(0.0, -tile.size.y * 0.5 - 16.0)
+	holder.position = top
+	# KARO — büyük, ORTALI, DÜŞÜK opacity (pixel). ÖNCE gelir; puan ÜSTÜNE biner.
+	var dia := Panel.new()
+	var dsb := StyleBoxFlat.new()
+	dsb.bg_color = Color(T.CHIP_BADGE.r, T.CHIP_BADGE.g, T.CHIP_BADGE.b, 0.32)  # düşük opacity
+	dsb.set_corner_radius_all(0)
+	dsb.anti_aliasing = false
+	dia.add_theme_stylebox_override("panel", dsb)
+	var dsz := 66.0
+	dia.size = Vector2(dsz, dsz)
+	dia.position = Vector2(-dsz / 2.0, -dsz / 2.0)
+	dia.pivot_offset = Vector2(dsz / 2.0, dsz / 2.0)
+	dia.rotation = deg_to_rad(45.0)
+	dia.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dia.modulate.a = 0.0
+	dia.scale = Vector2(0.4, 0.4)
+	holder.add_child(dia)
+	# "+N" — karonun TAM ÜSTÜNDE ortalı (yanında DEĞİL), beyaz kalın kontur, pixel font; SONRA gelir
+	var lbl := _label("+%d" % gain, 46, Color.WHITE, Color(0.05, 0.03, 0.04), 6)
+	lbl.add_theme_font_override("font", _tile_font)
+	lbl.size = Vector2(120, 60)
+	lbl.position = Vector2(-60, -30)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lbl.modulate.a = 0.0
+	holder.add_child(lbl)
+	# 1) ÖNCE karo: küçükten yaylanarak belir
+	var dt := create_tween()
+	dt.set_parallel(true)
+	dt.tween_property(dia, "modulate:a", 1.0, 0.14)
+	dt.tween_property(dia, "scale", Vector2(1.12, 1.12), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	dt.chain().tween_property(dia, "scale", Vector2.ONE, 0.14).set_trans(Tween.TRANS_SINE)
+	# 2) SONRA puan: karonun üstünde belir
+	var lt := create_tween()
+	lt.tween_interval(0.2)
+	lt.tween_property(lbl, "modulate:a", 1.0, 0.14)
+	# 3) Birlikte yavaşça yüksel + sön
+	var rt := create_tween()
+	rt.tween_interval(0.55)
+	rt.tween_property(holder, "position:y", top.y - 28.0, 0.55).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	rt.parallel().tween_property(holder, "modulate:a", 0.0, 0.4).set_delay(0.12)
+	rt.tween_callback(holder.queue_free)
+
+func _bezier(p0: Vector2, p1: Vector2, p2: Vector2, t: float) -> Vector2:
+	var u := 1.0 - t
+	return u * u * p0 + 2.0 * u * t * p1 + t * t * p2
+
+# Joker kartını id ile bul (skor sırasında tetikleneni vurgulamak için).
+func _find_joker_card(jid: String) -> Control:
+	if jid == "" or joker_box == null:
+		return null
+	for c in joker_box.get_children():
+		if c.has_meta("jid") and String(c.get_meta("jid")) == jid:
+			return c
+	return null
+
+func _op_value(op: Dictionary) -> String:
+	match op.get("op", ""):
+		"chip": return "+%d" % int(op["n"])
+		"mult": return "+%s" % _fmt(op["n"])
+		"xmult": return "×%s" % _fmt(op["n"])
+	return ""
+
+func _op_label(op: Dictionary) -> String:
+	return "ÇİP" if op.get("op", "") == "chip" else "ÇARPAN"
+
+func _op_color(op: Dictionary) -> Color:
+	return T.CHIP_BADGE if op.get("op", "") == "chip" else T.MULT
+
+# Joker etkisi uçan etiket — PIXEL-ART kutu (keskin köşe, chunky kenar, AA yok), TEK temiz satır.
+func _float_op_pill(global_pos: Vector2, value_text: String, label_text: String, color: Color) -> void:
+	if value_text == "":
+		return
+	var holder := Control.new()
+	holder.z_index = 36
+	fx_layer.add_child(holder)
+	var pill := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	# BORDERSIZ + renk-TONLU yarı saydam (flat solid değil) + yumuşak parıltı (neon değil, düşük alfa)
+	sb.bg_color = Color(color.r * 0.28, color.g * 0.28, color.b * 0.34, 0.6)
+	sb.set_corner_radius_all(15)
+	sb.shadow_color = Color(color.r, color.g, color.b, 0.3)  # yumuşak muted glow
+	sb.shadow_size = 14
+	sb.content_margin_left = 16
+	sb.content_margin_right = 16
+	sb.content_margin_top = 5
+	sb.content_margin_bottom = 7
+	pill.add_theme_stylebox_override("panel", sb)
+	# üst sheen (cam hissi — efektli derinlik)
+	var sheen := Panel.new()
+	var shsb := StyleBoxFlat.new()
+	shsb.bg_color = Color(1, 1, 1, 0.08)
+	shsb.corner_radius_top_left = 15
+	shsb.corner_radius_top_right = 15
+	sheen.add_theme_stylebox_override("panel", shsb)
+	sheen.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	sheen.offset_bottom = 16
+	sheen.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Sadece DEĞER (×2 / +15) — "ÇARPAN/ÇİP" yazısı YOK; renk ayırt eder (kullanıcı)
+	var txt := _label(value_text, 34, color.lerp(Color.WHITE, 0.35), T.OUTLINE, 5)
+	pill.add_child(txt)
+	holder.add_child(pill)
+	pill.add_child(sheen)  # metnin üstünde ince ışıltı
+	await get_tree().process_frame
+	if not is_instance_valid(holder):
+		return
+	var hs := pill.size
+	holder.pivot_offset = hs / 2.0
+	holder.global_position = global_pos - hs / 2.0
+	holder.scale = Vector2(0.4, 0.4)
+	_ember_burst(global_pos, 9, 2.4)  # belirince kıvılcım (güzel efekt)
+	var by := holder.position.y
+	var tw := create_tween()
+	tw.tween_property(holder, "scale", Vector2(1.16, 1.16), 0.22).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(holder, "scale", Vector2(1.0, 1.0), 0.14)
+	tw.tween_interval(0.45)  # okunur dursun
+	tw.tween_property(holder, "position:y", by - 62.0, 0.55).set_trans(Tween.TRANS_SINE)
+	tw.parallel().tween_property(holder, "modulate:a", 0.0, 0.55)
+	tw.tween_callback(holder.queue_free)
+
+# Uçan puan: harften patlar → yay çizip ÇİP kutusuna uçar → varınca kutu zıplar.
+func _fly_score(start_global: Vector2, gain: int) -> void:
+	var holder := Control.new()
+	holder.z_index = 30
+	fx_layer.add_child(holder)
+	var pill := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.05, 0.06, 0.10, 0.78)  # yazının arkasında küçük koyu zemin
+	sb.set_corner_radius_all(12)
+	sb.content_margin_left = 12
+	sb.content_margin_right = 12
+	sb.content_margin_top = 2
+	sb.content_margin_bottom = 2
+	pill.add_theme_stylebox_override("panel", sb)
+	var l := _label("+%d" % gain, 54, T.CHIP_BADGE, T.OUTLINE, 7)
+	l.add_theme_font_override("font", _tile_font)
+	pill.add_child(l)
+	holder.add_child(pill)
+	await get_tree().process_frame
+	if not is_instance_valid(holder):
+		return
+	var hs := pill.size
+	holder.pivot_offset = hs / 2.0
+	var p0 := start_global - hs / 2.0
+	holder.global_position = p0
+	holder.scale = Vector2(0.2, 0.2)
+	var target := _node_center(chip_seal_panel) - hs / 2.0
+	var ctrl := (p0 + target) * 0.5 + Vector2(0.0, -130.0)
+	_ember_burst(start_global, 8, 2.2)
+
+	var fly := create_tween()
+	# patlama gibi büyüyerek belir
+	fly.tween_property(holder, "scale", Vector2(1.4, 1.4), 0.15).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	fly.tween_property(holder, "scale", Vector2(1.05, 1.05), 0.08)
+	fly.tween_interval(0.06)
+	# yay çizerek çip kutusuna uç + küçül (paralel)
+	fly.tween_method(func(k): holder.global_position = _bezier(p0, ctrl, target, k), 0.0, 1.0, 0.42).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	fly.parallel().tween_property(holder, "scale", Vector2(0.6, 0.6), 0.42)
+	# varış: kutu zıpla + kıvılcım + yok et
+	fly.tween_callback(_on_chip_arrive)
+	fly.tween_property(holder, "modulate:a", 0.0, 0.1)
+	fly.tween_callback(holder.queue_free)
+
+func _on_chip_arrive() -> void:
+	if chip_seal_panel and is_instance_valid(chip_seal_panel):
+		_pop(chip_seal_panel, 1.16)
+		_ember_burst(_node_center(chip_seal_panel), 8, 2.4)
+	# collect tık'ı — ardışık varışlarda perde yükselir (ka-çing çing çing)
+	_play_collect(_collect, 1.0 + min(_coin_idx * 0.05, 0.6))
+	_coin_idx += 1
+
+func _pop(node: Control, amount: float) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	node.pivot_offset = node.size / 2.0
+	var tw := create_tween()
+	tw.tween_property(node, "scale", Vector2(amount, amount), 0.08).set_trans(Tween.TRANS_BACK)
+	tw.tween_property(node, "scale", Vector2.ONE, 0.14)
+
+func _count_label(label: Label, to: int, dur: float) -> void:
+	var from := int(label.text) if label.text.is_valid_int() else 0
+	var tw := create_tween()
+	tw.tween_method(func(v): label.text = str(int(round(v))), float(from), float(to), dur)
+
+# Etiketin yazı rengini kısa süre flash_color'a çevirip beyaza geri döndürür (parlama).
+func _flash_color(label: Label, flash_color: Color, dur: float) -> void:
+	if label == null or not is_instance_valid(label):
+		return
+	label.add_theme_color_override("font_color", flash_color)
+	var tw := create_tween()
+	tw.tween_method(func(c): label.add_theme_color_override("font_color", c), flash_color, Color.WHITE, dur)
+
+func _node_center(node: Control) -> Vector2:
+	return node.global_position + node.size / 2.0
+
+func _shake(amount: float, dur: float) -> void:
+	if not Settings.shake_on:
+		return
+	var tw := create_tween()
+	var steps := 6
+	for i in steps:
+		var off := Vector2(randf_range(-amount, amount), randf_range(-amount, amount))
+		tw.tween_property(shaker, "position", off, dur / steps)
+	tw.tween_property(shaker, "position", Vector2.ZERO, dur / steps)
+
+# ── Partikül (kor/alev) ──
+func _make_spark_tex() -> Texture2D:
+	# Yumuşak yuvarlak kıvılcım (sıcak kor hissi).
+	var g := Gradient.new()
+	g.set_color(0, Color(1, 1, 1, 1))
+	g.add_point(0.5, Color(1, 1, 1, 0.7))
+	g.set_color(1, Color(1, 1, 1, 0))
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(0.5, 0.0)
+	tex.width = 32
+	tex.height = 32
+	return tex
+
+func _ember_burst(global_pos: Vector2, amount: int, max_scale: float) -> void:
+	if not Settings.particles_on:
+		return
+	var p := CPUParticles2D.new()
+	fx_layer.add_child(p)
+	p.global_position = global_pos
+	p.texture = _spark_tex
+	p.material = _add_mat  # additive → parlayan kor/alev
+	p.one_shot = true
+	p.emitting = true
+	p.explosiveness = 1.0
+	p.amount = amount
+	p.lifetime = 0.55
+	p.direction = Vector2(0, -1)
+	p.spread = 180.0  # tam radyal saçılma (keskin patlama)
+	p.gravity = Vector2(0, 360.0)  # kıvılcımlar hızla düşer
+	p.initial_velocity_min = 160.0
+	p.initial_velocity_max = 430.0
+	p.damping_min = 80.0
+	p.damping_max = 170.0
+	p.scale_amount_min = max_scale * 0.25
+	p.scale_amount_max = max_scale * 0.6
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 1.0))
+	sc.add_point(Vector2(1.0, 0.0))
+	p.scale_amount_curve = sc
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(1.0, 0.95, 0.75))  # sıcak beyaz çekirdek
+	ramp.add_point(0.35, T.EMBER)
+	ramp.add_point(0.75, T.MULT)
+	ramp.set_color(1, Color(T.MULT.r, T.MULT.g, T.MULT.b, 0.0))
+	p.color_ramp = ramp
+	p.finished.connect(p.queue_free)
+
+# Skorda kutunun ÜSTÜNDE (dışarıda, yukarıda) dalgalı SHADER alevi — sadece o an, sonra söner.
+func _seal_flame_burst(panel: Control, color: Color, dur: float) -> void:
+	if not Settings.particles_on or panel == null or not is_instance_valid(panel):
+		return
+	var w := panel.size.x
+	var fh := 64.0
+	var c := _node_center(panel)
+	var fr := ColorRect.new()
+	fr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fr.size = Vector2(w, fh)
+	fr.position = Vector2(c.x - w / 2.0, c.y - panel.size.y / 2.0 - fh)  # tabanı kutu üst kenarı
+	fr.z_index = 20
+	var fm := ShaderMaterial.new()
+	fm.shader = load("res://shaders/box_flame.gdshader")
+	fm.set_shader_parameter("flame_color", Color(color.r, color.g, color.b, 0.85))
+	fm.set_shader_parameter("intensity", 1.0)
+	fr.material = fm
+	fr.modulate.a = 0.0
+	fx_layer.add_child(fr)
+	var tw := create_tween()
+	tw.tween_property(fr, "modulate:a", 1.0, 0.14).set_trans(Tween.TRANS_SINE)
+	tw.tween_interval(dur)
+	tw.tween_property(fr, "modulate:a", 0.0, 0.32).set_trans(Tween.TRANS_SINE)
+	tw.tween_callback(fr.queue_free)
+
+# ── (eski) partikül alevi — artık kullanılmıyor; _seal_flame_burst geçti ──
+func _seal_flame(panel: Control, base: Color, tip: Color, amount: int, dur: float) -> void:
+	if not Settings.particles_on:
+		return
+	if panel == null or not is_instance_valid(panel):
+		return
+	var p := CPUParticles2D.new()
+	p.texture = _spark_tex
+	p.material = _add_mat  # additive → parlayan kor
+	p.amount = amount
+	p.lifetime = 0.7
+	p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	p.emission_rect_extents = Vector2(panel.size.x * 0.42, 5)
+	p.direction = Vector2(0, -1)
+	p.spread = 18.0
+	p.gravity = Vector2(0, -120.0)  # yüksel (alev)
+	p.initial_velocity_min = 40.0
+	p.initial_velocity_max = 95.0
+	p.scale_amount_min = 0.3
+	p.scale_amount_max = 0.62
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.22, 1.0))
+	sc.add_point(Vector2(1.0, 0.0))
+	p.scale_amount_curve = sc
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(tip.r, tip.g, tip.b, 0.0))
+	ramp.add_point(0.18, Color(1.0, 0.96, 0.8))  # sıcak beyaz çekirdek
+	ramp.add_point(0.55, tip)
+	ramp.set_color(1, Color(base.r, base.g, base.b, 0.0))
+	p.color_ramp = ramp
+	fx_layer.add_child(p)
+	var c := _node_center(panel)
+	p.position = Vector2(c.x, c.y + panel.size.y * 0.5 - 6)
+	p.emitting = true
+	await get_tree().create_timer(dur).timeout
+	if is_instance_valid(p):
+		p.emitting = false
+		await get_tree().create_timer(p.lifetime).timeout
+		if is_instance_valid(p):
+			p.queue_free()
+
+# Merkez parlama (büyük skor anı) — genişleyip sönen sıcak hale.
+func _flash_ring(global_pos: Vector2, target_scale: float, color: Color) -> void:
+	var s := Sprite2D.new()
+	fx_layer.add_child(s)
+	s.texture = _spark_tex
+	s.material = _add_mat
+	s.global_position = global_pos
+	s.modulate = color
+	s.scale = Vector2(0.3, 0.3)
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(s, "scale", Vector2(target_scale, target_scale), 0.35).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(s, "modulate:a", 0.0, 0.4)
+	tw.chain().tween_callback(s.queue_free)
+
+func _fmt(n) -> String:
+	if typeof(n) == TYPE_FLOAT and n == floor(n):
+		return str(int(n))
+	return str(n)
+
+func _praise_label(text: String, size: int, color: Color) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_override("font", T.load_font())  # m6x11 pixel
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	l.add_theme_color_override("font_outline_color", Color(0.06, 0.03, 0.02))
+	l.add_theme_constant_override("outline_size", 8)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return l
+
+# ── Kutlama banner'ı (uzun/iyi kelimede motive edici animasyonlu yazı + partikül) ──
+func _praise_banner(score: int, target: int, word_len: int) -> void:
+	var ratio := float(score) / maxf(1.0, float(target))
+	var hype := 0
+	if ratio >= 1.0: hype = 4
+	elif ratio >= 0.55: hype = 3
+	elif ratio >= 0.32: hype = 2
+	elif ratio >= 0.16: hype = 1
+	# Uzun kelime motivasyonu (kullanıcı: "uzun kelimelerde")
+	if word_len >= 8: hype = maxi(hype, 4)
+	elif word_len >= 6: hype = maxi(hype, 3)
+	elif word_len >= 5: hype = maxi(hype, 2)
+	if hype == 0:
+		return
+	var labels := ["", "GÜZEL!", "SÜPER!", "MUHTEŞEM!", "İNANILMAZ!"]
+	var palette := [T.TEXT, T.GOOD, T.CHIP_BADGE, T.ORANGE, T.EMBER]
+	var col: Color = palette[hype]
+	var vp := get_viewport_rect().size
+	var pos := Vector2(vp.x * 0.58, vp.y * 0.30)
+
+	var size := 66 + hype * 18
+	# Gölge-katmanlı: arkada koyu kopya → derinlik (düz görünmesin); EĞİK DEĞİL.
+	var holder := Control.new()
+	holder.z_index = 41
+	fx_layer.add_child(holder)
+	# Renkli arkaplan band (yazıdan biraz büyük → ağırlık/derinlik, düz görünmesin)
+	var back := Panel.new()
+	var bsb := StyleBoxFlat.new()
+	bsb.bg_color = Color(0.05, 0.025, 0.03, 0.55)
+	bsb.set_corner_radius_all(18)
+	bsb.set_border_width_all(3)
+	bsb.border_color = Color(col.r, col.g, col.b, 0.85)
+	bsb.shadow_color = Color(col.r, col.g, col.b, 0.35)
+	bsb.shadow_size = 14
+	back.add_theme_stylebox_override("panel", bsb)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(back)
+	var shadow := _praise_label(labels[hype], size, Color(0.05, 0.02, 0.02, 0.85))
+	shadow.position = Vector2(5, 7)
+	holder.add_child(shadow)
+	var main := _praise_label(labels[hype], size, col)
+	holder.add_child(main)
+	await get_tree().process_frame  # boyut otursun
+	if not is_instance_valid(holder):
+		return
+	var ls := main.size
+	shadow.custom_minimum_size = ls
+	back.position = Vector2(-26, -6)
+	back.size = ls + Vector2(52, 14)
+	holder.pivot_offset = ls / 2.0
+	holder.global_position = pos - ls / 2.0
+	holder.scale = Vector2(0.3, 0.3)
+	holder.modulate.a = 0.0
+	var base_y := holder.position.y
+
+	var tw := create_tween()
+	tw.tween_property(holder, "scale", Vector2(1.42, 1.42), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(holder, "modulate:a", 1.0, 0.12)
+	tw.tween_property(holder, "scale", Vector2(1.0, 1.0), 0.14).set_trans(Tween.TRANS_BACK)
+	tw.tween_interval(0.5)
+	tw.tween_property(holder, "position:y", base_y - 66.0, 0.45).set_trans(Tween.TRANS_SINE)
+	tw.parallel().tween_property(holder, "modulate:a", 0.0, 0.45)
+	tw.tween_callback(holder.queue_free)
+
+	_ember_burst(pos, 18 + hype * 14, 3.0 + hype * 0.4)
+	_flash_ring(pos, 6.0 + hype * 1.2, Color(col.r, col.g, col.b, 0.7))  # her seviyede parlama
+	if hype >= 3:
+		_shake(5.0 + hype * 2.0, 0.4)
+		_play_collect(_collect_big, 1.0 + (hype - 3) * 0.18)
+
+# ── Demo ──
+func _demo_permute(a: Array) -> Array:
+	if a.size() <= 1:
+		return [a]
+	var out := []
+	for i in a.size():
+		var rest: Array = a.duplicate()
+		rest.remove_at(i)
+		for p in _demo_permute(rest):
+			var perm := [a[i]]
+			perm.append_array(p)
+			out.append(perm)
+	return out
+
+func _demo_find(hand: Array):
+	var max_len: int = min(5, hand.size())
+	for length in range(max_len, 1, -1):
+		var res = _demo_rec(hand, 0, [], length)
+		if res != null:
+			return res
+	return null
+
+func _demo_rec(hand: Array, start: int, pick: Array, length: int):
+	if pick.size() == length:
+		for p in _demo_permute(pick):
+			var w := ""
+			for idx in p:
+				w += hand[idx]["char"]
+			if Dictionary_.is_valid_word(w, 2):
+				var ids := []
+				for idx in p:
+					ids.append(int(hand[idx]["id"]))
+				return ids
+		return null
+	for i in range(start, hand.size()):
+		var np: Array = pick.duplicate()
+		np.append(i)
+		var r = _demo_rec(hand, i + 1, np, length)
+		if r != null:
+			return r
+	return null
+
+func demo_select_valid() -> void:
+	var found = _demo_find(state["round"]["hand"])
+	if found == null:
+		return
+	selected_ids = found
+	for id in found:
+		if tile_by_id.has(id):
+			tile_by_id[id].set_meta("selected", true)
+	_layout_hand(false)
+	_update_word_display()
+
+func demo_play() -> void:
+	_on_play()
+
+# Debug: hedefi yükselt → kelime oyna ama tur BİTMESİN (diff-refill görsel doğrulama).
+func demo_play_refill() -> void:
+	state["round"]["target"] = 999999
+	demo_select_valid()
+	_on_play()
+
+# ── State → görsel ──
+func _refresh(deal_in: bool, sound: bool = false) -> void:
+	_refresh_hud()
+	_rebuild_hand(deal_in, sound)
+	_update_word_display()
+
+# Sol panel + joker rafı + sayaçlar (el'e DOKUNMAZ → diff-refill bunu ayrı kullanır).
+func _refresh_hud() -> void:
+	var run: Dictionary = state["run"]
+	var round_d: Dictionary = state["round"]
+	blind_header.text = String(round_d["blind"]["name"]).to_upper()
+	target_label.text = "EN AZ %d PUAN" % round_d["target"]
+	round_score_label.text = str(round_d["score"])
+	money_label.text = "$%d" % run["money"]
+	plays_value.text = str(round_d["playsLeft"])
+	if _prev_plays >= 0 and round_d["playsLeft"] < _prev_plays:
+		_float_minus(plays_value, _prev_plays - round_d["playsLeft"], T.MULT)
+	_prev_plays = round_d["playsLeft"]
+	discards_value.text = str(round_d["discardsLeft"])
+	if _prev_discards >= 0 and round_d["discardsLeft"] < _prev_discards:
+		_float_minus(discards_value, _prev_discards - round_d["discardsLeft"], T.CHIP_BADGE)
+	_prev_discards = round_d["discardsLeft"]
+	ante_label.text = "%d/8" % run["ante"]
+	if round_value:
+		round_value.text = str(run["blindIndex"] + 1)
+	if deck_count_label:
+		deck_count_label.text = "%d/%d" % [round_d["pool"].size(), run["deck"].size()]
+	joker_caption.text = "JOKERLER %d/%d" % [run["jokers"].size(), MAX_JOKERS]
+	_update_boss_banner()
+	_rebuild_jokers()
+
+func _update_boss_banner() -> void:
+	_apply_blind_palette()
+	if boss_panel == null:
+		return
+	var round_d: Dictionary = state["round"]
+	var boss = round_d.get("boss", null)
+	var is_boss: bool = round_d["blind"].get("type", "") == "boss" and boss != null
+	boss_panel.visible = is_boss
+	if is_boss:
+		boss_name_label.text = "%s  %s" % [boss.get("icon", "💀"), String(boss["name"]).to_upper()]
+		boss_desc_label.text = boss["description"]
+		_pop(boss_panel, 1.05)
+
+# Her tur arka planı farklı renk; patronlarda kırmızı (kullanıcı tercihi).
+const COOL_PALETTES := [
+	[Color(0.055, 0.165, 0.133), Color(0.106, 0.275, 0.227), Color(0.18, 0.43, 0.35)],  # yeşil
+	[Color(0.04, 0.11, 0.18), Color(0.07, 0.22, 0.34), Color(0.12, 0.40, 0.52)],        # mavi
+	[Color(0.10, 0.06, 0.18), Color(0.18, 0.12, 0.30), Color(0.34, 0.22, 0.50)],        # mor
+	[Color(0.05, 0.14, 0.13), Color(0.08, 0.26, 0.24), Color(0.14, 0.44, 0.40)],        # teal
+	[Color(0.15, 0.10, 0.04), Color(0.26, 0.17, 0.07), Color(0.44, 0.30, 0.12)],        # amber
+]
+const BOSS_PALETTE := [Color(0.17, 0.03, 0.03), Color(0.33, 0.07, 0.05), Color(0.55, 0.13, 0.10)]
+
+func _palette_for_current() -> Array:
+	if state["round"]["blind"].get("type", "") == "boss":
+		return BOSS_PALETTE
+	var idx: int = (int(state["run"]["ante"]) - 1) * 2 + int(state["run"]["blindIndex"])
+	return COOL_PALETTES[idx % COOL_PALETTES.size()]
+
+# Arka plan + sol paneli yeni palete YUMUŞAK geçirir (pat değil — kullanıcı tercihi).
+func _apply_blind_palette() -> void:
+	var bg = get_parent().get_node_or_null("Background")
+	if bg == null or not (bg.material is ShaderMaterial):
+		return
+	_pal_mat = bg.material
+	var target := _palette_for_current()
+	var to_side: Color = (target[0] as Color)  # sol panel = palet deep tonu (belirgin)
+	var to_themed: Color = (target[1] as Color).darkened(0.15)  # iç paneller = palet felt tonu
+	var fs: Color = _sidebar_sb.bg_color if _sidebar_sb else T.SIDEBAR
+	_pal_from = [
+		_pal_mat.get_shader_parameter("color_deep"),
+		_pal_mat.get_shader_parameter("color_felt"),
+		_pal_mat.get_shader_parameter("color_high"),
+		fs,
+		_cur_themed,
+	]
+	_pal_to = [target[0], target[1], target[2], to_side, to_themed]
+	_cur_themed = to_themed
+	if _palette_tween and _palette_tween.is_valid():
+		_palette_tween.kill()
+	_palette_tween = create_tween()
+	_palette_tween.tween_method(_palette_step, 0.0, 1.0, 0.85).set_trans(Tween.TRANS_SINE)
+
+func _palette_step(t: float) -> void:
+	if _pal_mat == null:
+		return
+	_pal_mat.set_shader_parameter("color_deep", (_pal_from[0] as Color).lerp(_pal_to[0], t))
+	_pal_mat.set_shader_parameter("color_felt", (_pal_from[1] as Color).lerp(_pal_to[1], t))
+	_pal_mat.set_shader_parameter("color_high", (_pal_from[2] as Color).lerp(_pal_to[2], t))
+	if _sidebar_sb:
+		_sidebar_sb.bg_color = (_pal_from[3] as Color).lerp(_pal_to[3], t)
+	var tc := (_pal_from[4] as Color).lerp(_pal_to[4], t)
+	for sb in _themed_sbs:
+		sb.bg_color = tc
+
+func _rebuild_jokers() -> void:
+	for c in joker_box.get_children():
+		c.queue_free()
+	var jokers: Array = state["run"]["jokers"]
+	var anim_i := 0
+	for i in MAX_JOKERS:
+		if i < jokers.size():
+			var card: Control
+			if _shop_mode:
+				card = _sellable_joker_card(jokers[i])  # dükkânda tıkla → SAT
+			else:
+				card = _make_joker_card(jokers[i])
+			joker_box.add_child(card)
+			if _animate_jokers:
+				_pop_in_joker(card, anim_i)
+				anim_i += 1
+		else:
+			joker_box.add_child(_make_joker_slot())
+	_animate_jokers = false
+
+# Joker kartı zıplayarak belirir (soket değil, canlı). HBox pozisyonu ezdiği için scale+alpha.
+func _pop_in_joker(card: Control, order: int) -> void:
+	card.pivot_offset = Vector2(61, 75)
+	card.modulate.a = 0.0
+	card.scale = Vector2(0.45, 0.45)
+	var delay := order * 0.06
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(card, "modulate:a", 1.0, 0.2).set_delay(delay)
+	tw.tween_property(card, "scale", Vector2.ONE, 0.34).set_delay(delay).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+# ════════════════ 5e: DÜKKÂN / KAZAN / KAYBET ════════════════
+var play_view: VBoxContainer    # oyun görünümü (kelime tahtası + el + aksiyonlar)
+var shop_view: VBoxContainer    # dükkân görünümü (tahta içinde, Balatro tarzı)
+var blind_view: VBoxContainer   # blind seçim görünümü (tahta içinde, Balatro)
+var _shop_mode := false         # dükkândayken üst jokerler tıkla→SAT olur
+var _animate_jokers := false    # bir sonraki _rebuild_jokers'ta kartlar zıplayarak gelsin
+var overlay: Control            # kazan/kaybet ekranı (tam ekran)
+var overlay_card: VBoxContainer
+var _overlay_dim: ColorRect     # arka karartma (game-over'da kırmızı tint)
+var _overlay_panel: PanelContainer
+var _shop_reward = null
+var _shop_msg := ""             # son satın alma sonucu (örn. "A harfin YALDIZ oldu")
+
+func _ensure_overlay() -> void:
+	if overlay and is_instance_valid(overlay):
+		return
+	overlay = Control.new()
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(overlay)  # fx_layer'dan SONRA → her şeyin üstünde
+	_overlay_dim = ColorRect.new()
+	_overlay_dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_overlay_dim.color = Color(0.02, 0.01, 0.0, 0.7)
+	overlay.add_child(_overlay_dim)
+	# Panel CenterContainer'da DEĞİL → elle ortalanır ki aşağıdan yaylanarak gelsin (_present_overlay).
+	_overlay_panel = PanelContainer.new()
+	_overlay_panel.add_theme_stylebox_override("panel", T.felt_panel(T.SIDEBAR, T.BRASS, 20))
+	overlay.add_child(_overlay_panel)
+	var panel := _overlay_panel
+	var pad := MarginContainer.new()
+	pad.add_theme_constant_override("margin_left", 40)
+	pad.add_theme_constant_override("margin_right", 40)
+	pad.add_theme_constant_override("margin_top", 26)
+	pad.add_theme_constant_override("margin_bottom", 30)
+	panel.add_child(pad)
+	overlay_card = VBoxContainer.new()
+	overlay_card.add_theme_constant_override("separation", 14)
+	pad.add_child(overlay_card)
+
+func _clear_overlay() -> void:
+	_ensure_overlay()
+	_theme_overlay(Color(0.02, 0.01, 0.0, 0.7), T.BRASS)  # varsayılan (info/pause/dükkân ödülü)
+	for c in overlay_card.get_children():
+		c.queue_free()
+
+# Overlay panelini AŞAĞIDAN yaylanarak getir + karartmayı yumuşakça aç (Balatro juice).
+# İçerik eklendikten SONRA çağrılır (panel boyutu için bir kare beklenir).
+func _present_overlay() -> void:
+	_ensure_overlay()
+	overlay.visible = true
+	_overlay_dim.modulate.a = 0.0
+	_overlay_panel.modulate.a = 0.0
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var sz := _overlay_panel.size
+	var screen := overlay.size
+	var cx := (screen.x - sz.x) * 0.5
+	var cy := (screen.y - sz.y) * 0.5
+	_overlay_panel.pivot_offset = sz * 0.5
+	_overlay_panel.position = Vector2(cx, cy + 300.0)  # ekranın altından başla
+	_overlay_panel.scale = Vector2(0.9, 0.9)
+	var t := create_tween()
+	t.set_parallel(true)
+	t.tween_property(_overlay_dim, "modulate:a", 1.0, 0.22)
+	t.tween_property(_overlay_panel, "modulate:a", 1.0, 0.2)
+	t.tween_property(_overlay_panel, "position:y", cy, 0.52).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.tween_property(_overlay_panel, "scale", Vector2.ONE, 0.52).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# Overlay arka karartma + panel kenar rengi (game-over kırmızı, kazanç altın).
+func _theme_overlay(dim_color: Color, border_color: Color) -> void:
+	if _overlay_dim and is_instance_valid(_overlay_dim):
+		_overlay_dim.color = dim_color
+	if _overlay_panel and is_instance_valid(_overlay_panel):
+		_overlay_panel.add_theme_stylebox_override("panel", T.felt_panel(T.SIDEBAR, border_color, 20))
+
+func _close_overlay() -> void:
+	if overlay and is_instance_valid(overlay):
+		overlay.visible = false
+
+# ── CASH OUT (tur sonu ödül dökümü — dükkândan ÖNCE, Balatro tarzı) ──
+func _open_cash_out() -> void:
+	var round_d: Dictionary = state["round"]
+	# Önizleme (toplamadan) — para TOPLA'ya basınca artar (dükkân toplar).
+	var reward: Dictionary = Economy.blind_reward(round_d["blind"], round_d, state["run"]["money"])
+	_clear_overlay()
+	_theme_overlay(Color(0.03, 0.12, 0.07, 0.82), T.GOOD)  # yeşil/altın kazanç teması
+	overlay_card.add_child(_wavy_label("TUR GEÇİLDİ!", 30, T.GOOD, T.OUTLINE, 6.0, 3.0))
+	# BÜYÜK TURUNCU "TOPLA" BANNER (Balatro "Cash Out" — chunky 3D pill, koyu yazı)
+	var banner := PanelContainer.new()
+	banner.add_theme_stylebox_override("panel", T.button_filled(T.ORANGE))
+	var brow := HBoxContainer.new()
+	brow.alignment = BoxContainer.ALIGNMENT_CENTER
+	brow.add_theme_constant_override("separation", 14)
+	brow.add_child(_center(_label("TOPLA", 40, T.INK, Color(1, 1, 1, 0.25), 3)))
+	# altın para rozeti
+	var coin := PanelContainer.new()
+	var coinsb := StyleBoxFlat.new()
+	coinsb.bg_color = T.BRASS
+	coinsb.set_corner_radius_all(10)
+	coinsb.border_width_bottom = 4
+	coinsb.border_color = T.BRASS.darkened(0.4)
+	coinsb.content_margin_left = 16
+	coinsb.content_margin_right = 16
+	coinsb.content_margin_top = 2
+	coinsb.content_margin_bottom = 2
+	coin.add_theme_stylebox_override("panel", coinsb)
+	coin.add_child(_center(_label("$%d" % reward["total"], 44, T.INK, Color(1, 1, 1, 0.3), 3)))
+	brow.add_child(coin)
+	banner.add_child(brow)
+	overlay_card.add_child(banner)
+	var gap0 := Control.new()
+	gap0.custom_minimum_size = Vector2(0, 4)
+	overlay_card.add_child(gap0)
+	# Ödül dökümü (her satır: etiket .... +$Y altın PILL)
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", T.stat_inset())
+	panel.custom_minimum_size = Vector2(460, 0)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 9)
+	var rows := [
+		["Tur ödülü", reward["base"]],
+		["Kalan hak  ×%d" % round_d["playsLeft"], reward["leftover"]],
+		["Faiz  (her $5 → $1)", reward["interest"]],
+	]
+	for r in rows:
+		var line := HBoxContainer.new()
+		var name_l := _label(String(r[0]), 19, T.TEXT)
+		name_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name_l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		line.add_child(name_l)
+		line.add_child(_gold_pill("+$%d" % int(r[1])))
+		v.add_child(line)
+	panel.add_child(v)
+	overlay_card.add_child(panel)
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 4)
+	overlay_card.add_child(gap)
+	var go := _chunky_btn("DÜKKANA GİT  →", T.GOOD, T.INK)
+	go.custom_minimum_size = Vector2(0, 58)
+	go.pressed.connect(_on_cash_out_continue)
+	overlay_card.add_child(go)
+	_present_overlay()
+	_coin_juice()  # belirince altın kıvılcım
+
+# Altın değer pill'i (cash out dökümü) — koyu yazı, altın yuvarlak zemin.
+func _gold_pill(text: String) -> Control:
+	var p := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = T.BRASS
+	sb.set_corner_radius_all(9)
+	sb.content_margin_left = 12
+	sb.content_margin_right = 12
+	sb.content_margin_top = 1
+	sb.content_margin_bottom = 1
+	p.add_theme_stylebox_override("panel", sb)
+	p.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	p.add_child(_label(text, 19, T.INK))
+	return p
+
+# Cash out belirince altın kıvılcım yağmuru (juice).
+func _coin_juice() -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not (_overlay_panel and is_instance_valid(_overlay_panel)):
+		return
+	var c := _node_center(_overlay_panel)
+	_ember_burst(c + Vector2(0, -_overlay_panel.size.y * 0.25), 18, 3.2)
+
+func _on_cash_out_continue() -> void:
+	_close_overlay()
+	_open_shop()
+
+# ── BLIND SEÇİM EKRANI (Balatro "Choose your next Blind") — TAHTA-İÇİ uzun kolonlar ──
+func _open_blind_select() -> void:
+	_shop_mode = false
+	play_view.visible = false
+	shop_view.visible = false
+	blind_view.visible = true
+	if deck_holder:
+		deck_holder.visible = true  # deste blind seçiminde de görünür (kullanıcı)
+	for c in blind_view.get_children():
+		c.queue_free()
+	var title := _wavy_label("SIRADAKİ TURU SEÇ", 28, T.BRASS, T.OUTLINE, 7.0, 3.0)
+	title.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN  # sola hizalı (kolonlar solda)
+	blind_view.add_child(title)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 18)
+	row.alignment = BoxContainer.ALIGNMENT_BEGIN  # SOLDAN başla (sol boş kalmasın — kullanıcı)
+	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var cur: int = state["run"]["blindIndex"]
+	for i in Blinds.BLINDS.size():
+		row.add_child(_blind_column(Blinds.BLINDS[i], i, cur))
+	blind_view.add_child(row)
+	_animate_blind_columns(row)
+
+# Sütunlar sırayla aşağıdan yaylanarak gelir (juice).
+func _animate_blind_columns(row: Control) -> void:
+	await get_tree().process_frame
+	var i := 0
+	for col in row.get_children():
+		col.pivot_offset = col.size / 2.0
+		col.modulate.a = 0.0
+		col.position.y += 40.0
+		var tw := create_tween().set_parallel(true)
+		tw.tween_property(col, "modulate:a", 1.0, 0.25).set_delay(i * 0.08)
+		tw.tween_property(col, "position:y", col.position.y - 40.0, 0.4).set_delay(i * 0.08).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		i += 1
+
+# Tek blind KOLONU (uzun dikey panel): üstte SEÇ, isim sekmesi, ikon rozeti, hedef+ödül, "veya", altta ATLA.
+func _blind_column(blind: Dictionary, i: int, cur: int) -> Control:
+	var accent := Color(blind["color"])
+	var active: bool = (i == cur)
+	var done: bool = (i < cur)
+	var col := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = T.FELT_800 if active else Color(T.FELT_800.r, T.FELT_800.g, T.FELT_800.b, 0.6)
+	# ÜST köşe yuvarlak, ALT köşe KESKİN → dibe yapışık (kullanıcı: "alt tarafı olmasın")
+	sb.corner_radius_top_left = 14
+	sb.corner_radius_top_right = 14
+	sb.corner_radius_bottom_left = 0
+	sb.corner_radius_bottom_right = 0
+	sb.border_width_left = 4 if active else 2
+	sb.border_width_right = 4 if active else 2
+	sb.border_width_top = 4 if active else 2
+	sb.border_width_bottom = 0  # alt kenar yok (yapışık)
+	sb.border_color = accent if active else Color(accent.r, accent.g, accent.b, 0.35)
+	sb.content_margin_left = 18
+	sb.content_margin_right = 18
+	sb.content_margin_top = 16
+	sb.content_margin_bottom = 16
+	col.add_theme_stylebox_override("panel", sb)
+	col.custom_minimum_size = Vector2(300, 0)  # daha geniş (kullanıcı)
+	col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 10)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	# 1) ÜST: SEÇ butonu (aktif) / boş yer
+	if active:
+		var sel := _chunky_btn("SEÇ", T.BRASS, T.INK)
+		sel.custom_minimum_size = Vector2(0, 50)
+		sel.pressed.connect(_on_blind_select)
+		v.add_child(sel)
+	else:
+		var ph := Control.new()
+		ph.custom_minimum_size = Vector2(0, 50)
+		v.add_child(ph)
+	# 2) İSİM SEKMESİ (renkli yuvarlak tab)
+	var tab := PanelContainer.new()
+	var tsb := StyleBoxFlat.new()
+	tsb.bg_color = accent.darkened(0.15)
+	tsb.set_corner_radius_all(8)
+	tsb.content_margin_left = 10
+	tsb.content_margin_right = 10
+	tsb.content_margin_top = 4
+	tsb.content_margin_bottom = 4
+	tab.add_theme_stylebox_override("panel", tsb)
+	var tname := String(blind["name"]).to_upper()
+	if blind["type"] == "boss":
+		tname = "PATRON"
+		if active and state["round"].get("boss", null) != null:
+			tname = String(state["round"]["boss"]["name"]).to_upper()
+	tab.add_child(_center(_label(tname, 22, Color(1, 1, 1, 0.95), T.OUTLINE, 3)))
+	v.add_child(tab)
+	# 3) İKON ROZETİ (renkli daire + blind ikonu)
+	var badge := Panel.new()
+	var bsb := StyleBoxFlat.new()
+	bsb.bg_color = accent.darkened(0.1)
+	bsb.set_corner_radius_all(48)
+	bsb.set_border_width_all(3)
+	bsb.border_color = accent.lightened(0.25)
+	badge.add_theme_stylebox_override("panel", bsb)
+	badge.custom_minimum_size = Vector2(86, 86)
+	badge.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	var bico: String = {"small": "✨", "big": "⭐", "boss": "💀"}.get(blind["type"], "✨")
+	var bil := _label(bico, 40, Color(1, 1, 1, 0.95), T.OUTLINE, 4)
+	bil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bil.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bil.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bil.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	badge.add_child(bil)
+	v.add_child(_center_h(badge))
+	# 4) Patron kısıtlaması (aktif patron)
+	if blind["type"] == "boss" and active and state["round"].get("boss", null) != null:
+		var bd := _center(_label(String(state["round"]["boss"]["description"]), 13, T.MULT))
+		bd.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		bd.custom_minimum_size = Vector2(196, 0)
+		v.add_child(bd)
+	# 5) SKOR/ÖDÜL koyu inset panel (referans: "Score at least" + çip ikonu + turuncu sayı + $$$)
+	var info := PanelContainer.new()
+	var isb := StyleBoxFlat.new()
+	isb.bg_color = Color(0.05, 0.10, 0.08, 0.85)
+	isb.set_corner_radius_all(12)
+	isb.content_margin_left = 12
+	isb.content_margin_right = 12
+	isb.content_margin_top = 10
+	isb.content_margin_bottom = 10
+	info.add_theme_stylebox_override("panel", isb)
+	var iv := VBoxContainer.new()
+	iv.add_theme_constant_override("separation", 4)
+	iv.alignment = BoxContainer.ALIGNMENT_CENTER
+	iv.add_child(_center(_label("EN AZ", 14, Color(1, 1, 1, 0.85))))
+	# çip ikonu (küçük beyaz daire) + hedef sayısı (turuncu, iri)
+	var hr := HBoxContainer.new()
+	hr.alignment = BoxContainer.ALIGNMENT_CENTER
+	hr.add_theme_constant_override("separation", 8)
+	var coin := Panel.new()
+	var csb := StyleBoxFlat.new()
+	csb.bg_color = Color(0.92, 0.95, 1.0)
+	csb.set_corner_radius_all(16)
+	coin.add_theme_stylebox_override("panel", csb)
+	coin.custom_minimum_size = Vector2(24, 24)
+	coin.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hr.add_child(coin)
+	hr.add_child(_label("%d" % Round.target_for_blind(state, blind), 36, T.ORANGE, T.OUTLINE, 5))
+	iv.add_child(hr)
+	var dollars := "$".repeat(clampi(int(blind["reward"]), 1, 6))
+	iv.add_child(_center(_label("Ödül:  %s" % dollars, 17, T.BRASS)))
+	info.add_child(iv)
+	v.add_child(info)
+	# 6) alt: durum / ATLA
+	var spacer := Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	v.add_child(spacer)
+	if done:
+		v.add_child(_center(_label("✓ GEÇİLDİ", 18, T.GOOD)))
+	elif active and blind["type"] != "boss":
+		v.add_child(_center(_label("— veya —", 14, T.TEXT_DIM)))
+		var skip := _chunky_btn("🏷  ATLA", T.MULT, Color.WHITE)
+		skip.add_theme_font_size_override("font_size", 22)
+		skip.custom_minimum_size = Vector2(0, 44)
+		skip.pressed.connect(_on_blind_skip)
+		v.add_child(skip)
+	elif not active:
+		v.add_child(_center(_label("SIRADA", 15, T.TEXT_DIM)))
+	col.add_child(v)
+	if not active:
+		col.modulate.a = 0.7  # geçili/sıradaki sönük
+	return col
+
+func _on_blind_select() -> void:
+	blind_view.visible = false
+	play_view.visible = true
+	if deck_holder:
+		deck_holder.visible = true
+	_reset_flames()
+	_refresh(true, true)  # el SEÇ'te dağıtılır (desteden gelir + shuffle)
+
+func _on_blind_skip() -> void:
+	var r := Round.skip_blind(state)
+	if not r.get("ok", false):
+		return
+	_play_card_move()
+	_refresh_hud()           # para/blind güncelle
+	_open_blind_select()     # yeni blind için seçim ekranını tekrar göster
+
+# ── DÜKKÂN (tahta-içi, Balatro tarzı: sol panel+joker rafı kalır, orta alan değişir) ──
+func _open_shop() -> void:
+	_shop_reward = Round.collect_blind_reward(state)  # ödülü topla (bir kez, idempotent)
+	_shop_msg = ""
+	Shop.generate_shop(state)
+	_shop_mode = true
+	hint_label.text = ""
+	word_label.text = "—"
+	play_view.visible = false
+	blind_view.visible = false
+	shop_view.visible = true
+	if deck_holder:
+		deck_holder.visible = false  # deste dükkânda gizli (oyun alanına ait)
+	money_label.text = "$%d" % state["run"]["money"]
+	_rebuild_jokers()  # üst jokerler artık tıkla → SAT
+	_build_shop_ui()
+
+# Arcade marquee kutusu (Balatro "SHOP" — kırmızı dolgu, kalın koyu kenar).
+func _marquee_box() -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = T.MULT
+	s.set_corner_radius_all(8)
+	s.border_width_left = 4
+	s.border_width_right = 4
+	s.border_width_top = 4
+	s.border_width_bottom = 6
+	s.border_color = Color(0.09, 0.04, 0.03)
+	s.content_margin_top = 6
+	s.content_margin_bottom = 9
+	s.content_margin_left = 24
+	s.content_margin_right = 24
+	s.shadow_color = Color(0, 0, 0, 0.4)
+	s.shadow_size = 6
+	s.shadow_offset = Vector2(0, 4)
+	return s
+
+# Dükkân kartı stylebox — basılı kart hissi (az yuvarlak, kalın kenar, gölge).
+func _card_sb(accent: Color, hi: bool) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = T.FELT_700 if hi else T.FELT_800
+	s.set_corner_radius_all(8)
+	s.set_border_width_all(3)
+	s.border_color = accent
+	s.shadow_color = Color(0, 0, 0, 0.5)
+	s.shadow_size = 7
+	s.shadow_offset = Vector2(0, 5)
+	s.content_margin_left = 8
+	s.content_margin_right = 8
+	s.content_margin_top = 10
+	s.content_margin_bottom = 10
+	return s
+
+func _build_shop_ui() -> void:
+	for c in shop_view.get_children():
+		c.queue_free()
+
+	# Çerçeveli dükkân tezgahı (felt üstünde dağınık durmasın)
+	var frame := PanelContainer.new()
+	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var fsb := StyleBoxFlat.new()
+	fsb.bg_color = Color(0.03, 0.06, 0.05, 0.62)
+	fsb.set_corner_radius_all(18)
+	fsb.set_border_width_all(3)
+	fsb.border_color = T.BRASS
+	fsb.content_margin_left = 24
+	fsb.content_margin_right = 24
+	fsb.content_margin_top = 16
+	fsb.content_margin_bottom = 20
+	frame.add_theme_stylebox_override("panel", fsb)
+	shop_view.add_child(frame)
+	var inner := VBoxContainer.new()
+	inner.add_theme_constant_override("separation", 14)
+	frame.add_child(inner)
+
+	# Marquee başlık
+	var header := PanelContainer.new()
+	header.add_theme_stylebox_override("panel", _marquee_box())
+	header.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	var hv := VBoxContainer.new()
+	hv.alignment = BoxContainer.ALIGNMENT_CENTER
+	hv.add_child(_center(_label("DUKKAN", 40, Color(1.0, 0.85, 0.32), Color(0.09, 0.04, 0.03), 5)))
+	var sub := "Run'ını geliştir!"
+	if _shop_reward:
+		sub = "Tur geçildi!   +$%d   (taban %d · hak %d · faiz %d)" % [
+			_shop_reward["total"], _shop_reward["base"], _shop_reward["leftover"], _shop_reward["interest"]]
+	hv.add_child(_center(_label(sub, 17, T.TEXT)))
+	if _shop_msg != "":
+		hv.add_child(_center(_label(_shop_msg, 16, T.EMBER)))
+	header.add_child(hv)
+	inner.add_child(_center_h(header))
+
+	var shop = state["run"]["shop"]
+	# Gövde: SOL [Sonraki Tur / Yenile] | SAĞ [jokerler + paketler]
+	var body := HBoxContainer.new()
+	body.add_theme_constant_override("separation", 18)
+	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	inner.add_child(body)
+
+	var lcol := VBoxContainer.new()
+	lcol.add_theme_constant_override("separation", 12)
+	lcol.custom_minimum_size = Vector2(168, 0)
+	var nb := _chunky_btn("SONRAKİ\nTUR  →", T.MULT, Color.WHITE)
+	nb.custom_minimum_size = Vector2(0, 100)
+	nb.pressed.connect(_on_next_blind)
+	lcol.add_child(nb)
+	var can_rr: bool = state["run"]["money"] >= shop["rerollCost"]
+	var rr := _chunky_btn("↻ YENİLE\n$%d" % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
+	rr.custom_minimum_size = Vector2(0, 78)
+	rr.disabled = not can_rr
+	rr.pressed.connect(_on_reroll)
+	lcol.add_child(rr)
+	body.add_child(lcol)
+
+	var rcol := VBoxContainer.new()
+	rcol.add_theme_constant_override("separation", 14)
+	rcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.add_child(rcol)
+
+	# Satılık jokerler (dikey kart + üstte altın fiyat etiketi)
+	var jrow := HBoxContainer.new()
+	jrow.add_theme_constant_override("separation", 14)
+	for j in shop["jokers"]:
+		jrow.add_child(_shop_joker_card(j))
+	if shop["jokers"].is_empty():
+		jrow.add_child(_label("(jokerler tükendi)", 16, T.TEXT_DIM))
+	rcol.add_child(jrow)
+
+	# Paketler: harf paketi + cila paketi + kupon. Seçim aktifse harf/cila taşları.
+	var prow := HBoxContainer.new()
+	prow.add_theme_constant_override("separation", 14)
+	var bc = state["run"]["boosterChoices"]
+	var ec = state["run"].get("enhancerChoices", null)
+	var pending = state["run"].get("pendingEnhancement", null)
+	if bc != null:
+		prow.add_child(_center_v(_label("HARF\nSEÇ →", 20, T.GOOD)))
+		for ch in bc:
+			var lb := _chunky_btn(ch, T.CARD_FACE, T.INK)
+			lb.custom_minimum_size = Vector2(86, 110)
+			lb.add_theme_font_size_override("font_size", 44)
+			lb.pressed.connect(_on_choose_letter.bind(ch))
+			prow.add_child(lb)
+	elif pending != null:
+		# Cila seçildi → hangi DESTE HARFİNE uygulanacağını seç (agency v2).
+		var pe = Enhancements.by_id(pending)
+		var pcol := Color(pe["color"])
+		prow.add_child(_center_v(_label("%s\nNEREYE? →" % String(pe["name"]).to_upper(), 18, pcol)))
+		var flow := HFlowContainer.new()
+		flow.add_theme_constant_override("h_separation", 7)
+		flow.add_theme_constant_override("v_separation", 7)
+		flow.custom_minimum_size = Vector2(540, 0)
+		flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		for entry in _deck_letter_counts():
+			var ch: String = entry["char"]
+			var lb := _chunky_btn(ch, T.CARD_FACE, T.INK)
+			lb.custom_minimum_size = Vector2(60, 72)
+			lb.add_theme_font_size_override("font_size", 34)
+			lb.tooltip_text = "“%s” (deste: ×%d) — %s ekle" % [ch, entry["count"], pe["name"]]
+			lb.pressed.connect(_on_apply_enh_to_letter.bind(ch))
+			flow.add_child(lb)
+		prow.add_child(flow)
+	elif ec != null:
+		prow.add_child(_center_v(_label("CİLA\nSEÇ →", 20, T.LILAC)))
+		for eid in ec:
+			prow.add_child(_enh_choice_card(eid))
+	else:
+		var can_boost: bool = (not shop["booster"]["used"]) and state["run"]["money"] >= shop["booster"]["cost"]
+		prow.add_child(_shop_card(T.GOOD, _pack_content("HARF\nPAKETİ", "desteye +1 harf", T.GOOD),
+			"$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
+		var enh = shop.get("enhancer", null)
+		if enh != null:
+			var can_enh: bool = (not enh["used"]) and state["run"]["money"] >= enh["cost"]
+			prow.add_child(_shop_card(T.CHIP, _pack_content("CİLA\nPAKETİ", "harfe foil/holo…", T.CHIP_BADGE),
+				"$%d" % enh["cost"], can_enh, _on_buy_enhancer, "Bir harfine kalıcı geliştirme (foil/holo/poly/altın/cam)"))
+		if shop["voucher"] != null:
+			var v = shop["voucher"]
+			var can_v: bool = state["run"]["money"] >= v["cost"]
+			prow.add_child(_shop_card(T.LILAC, _pack_content(String(v["name"]).to_upper(), "kalıcı yükseltme", T.LILAC),
+				"$%d" % v["cost"], can_v, _on_buy_voucher, v["description"]))
+	rcol.add_child(prow)
+
+# Geliştirme seçim kartı (Cila Paketi açılınca): sembol + isim + açıklama, tıkla → uygula.
+func _enh_choice_card(eid: String) -> Control:
+	var e = Enhancements.by_id(eid)
+	var accent := Color(e["color"])
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 6)
+	vb.add_child(_center(_label(e["symbol"], 46, accent)))
+	vb.add_child(_center(_label(String(e["name"]).to_upper(), 16, accent)))
+	var d := _center(_label(e["desc"], 13, T.TEXT_DIM))
+	d.custom_minimum_size = Vector2(150, 0)
+	vb.add_child(d)
+	return _shop_card(accent, vb, "SEÇ", true, _on_choose_enhancement.bind(eid), e["desc"])
+
+# Tek satırı yatayda ortalar (marquee için).
+func _center_h(node: Control) -> Control:
+	var h := HBoxContainer.new()
+	h.alignment = BoxContainer.ALIGNMENT_CENTER
+	h.add_child(node)
+	return h
+
+func _center_v(l: Label) -> Label:
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	return l
+
+# Genel dükkân kartı: görünüm PanelContainer + üstte şeffaf tıklama butonu + altın fiyat etiketi.
+func _shop_card(accent: Color, content: Control, price_text: String, can_buy: bool, on_buy: Callable, tip: String) -> Control:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", _card_sb(accent, false))
+	card.custom_minimum_size = Vector2(162, 196)
+	card.add_child(content)
+	var hit := Button.new()
+	hit.flat = true
+	hit.focus_mode = Control.FOCUS_NONE
+	hit.disabled = not can_buy
+	hit.tooltip_text = tip
+	hit.pressed.connect(on_buy)
+	card.add_child(hit)  # içeriğin ÜSTÜNDE → tıklamayı yakalar
+	if not can_buy:
+		card.modulate = Color(1, 1, 1, 0.5)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 3)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	if price_text != "":
+		col.add_child(_center(_label(price_text, 26, T.BRASS if can_buy else T.TEXT_DIM, T.OUTLINE, 5)))
+	col.add_child(card)
+	return col
+
+func _shop_joker_card(joker: Dictionary) -> Control:
+	var rarity: Color = T.RARITY.get(joker.get("rarity", "common"), T.CARD_EDGE)
+	var can_buy: bool = state["run"]["money"] >= joker["cost"] and state["run"]["jokers"].size() < MAX_JOKERS
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 8)
+	vb.add_child(_center(_label(joker.get("icon", "?"), 54, T.TEXT)))
+	var nm := _center(_label(joker["name"], 18, T.BRASS))
+	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	nm.custom_minimum_size = Vector2(146, 0)
+	vb.add_child(nm)
+	var tip := "%s\n[%s]" % [joker["description"], joker.get("rarity", "common")]
+	return _shop_card(rarity, vb, "$%d" % joker["cost"], can_buy, _on_buy_joker.bind(joker["id"]), tip)
+
+# Paket/kupon kartı içeriği (emoji yok — daha "basılı kart").
+func _pack_content(title: String, sub: String, accent: Color) -> Control:
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 8)
+	var t := _center(_label(title, 22, accent))
+	t.custom_minimum_size = Vector2(146, 0)
+	vb.add_child(t)
+	vb.add_child(_center(_label(sub, 14, T.TEXT_DIM)))
+	return vb
+
+# Üst raftaki joker — dükkân modunda tıkla → SAT (Balatro: jokerler hep üstte, oradan satılır).
+func _sellable_joker_card(joker: Dictionary) -> Control:
+	var b := Button.new()
+	var rarity = T.RARITY.get(joker.get("rarity", "common"), T.CARD_EDGE)
+	b.add_theme_stylebox_override("normal", T.felt_panel(T.FELT_700, rarity, 16))
+	b.add_theme_stylebox_override("hover", T.felt_panel(T.FELT_800, T.MULT, 16))
+	b.add_theme_stylebox_override("pressed", T.felt_panel(T.FELT_800, T.MULT, 16))
+	b.custom_minimum_size = Vector2(98, 120)
+	b.add_theme_font_size_override("font_size", 38)
+	b.text = joker.get("icon", "?")
+	b.tooltip_text = "%s — tıkla SAT: $%d\n%s" % [joker["name"], max(1, int(joker["cost"] / 2)), joker["description"]]
+	b.pressed.connect(_on_sell_joker.bind(joker["id"]))
+	return b
+
+func _after_shop_change() -> void:
+	money_label.text = "$%d" % state["run"]["money"]
+	joker_caption.text = "JOKERLER %d/%d — tıkla → SAT" % [state["run"]["jokers"].size(), MAX_JOKERS]
+	_animate_jokers = true  # alınan/satılan sonrası jokerler zıplayarak yerleşsin
+	_rebuild_jokers()
+	_build_shop_ui()
+
+func _on_buy_joker(id: String) -> void:
+	if Shop.buy_joker(state, id).get("ok", false):
+		_play_card_move()
+		_after_shop_change()
+
+func _on_sell_joker(id: String) -> void:
+	if Shop.sell_joker(state, id).get("ok", false):
+		_play_card_move()
+		_after_shop_change()
+
+func _on_reroll() -> void:
+	if Shop.reroll(state).get("ok", false):
+		_play_shuffle()
+		_after_shop_change()
+
+func _on_buy_booster() -> void:
+	if Shop.buy_booster(state).get("ok", false):
+		_after_shop_change()
+
+func _on_choose_letter(ch: String) -> void:
+	if Shop.choose_booster_letter(state, ch).get("ok", false):
+		_play_card_move()
+		_shop_msg = "%s harfi destene katıldı." % ch
+		_after_shop_change()
+
+func _on_buy_enhancer() -> void:
+	if Shop.buy_enhancer(state).get("ok", false):
+		_after_shop_change()
+
+func _on_choose_enhancement(eid: String) -> void:
+	# Geliştirmeyi seç → beklemeye al; sonra oyuncu hangi harfe uygulanacağını seçer (agency v2).
+	var r := Shop.choose_enhancement(state, eid)
+	if r.get("ok", false):
+		_play_card_move()
+		var e = Enhancements.by_id(eid)
+		_shop_msg = "%s nereye? Bir harf seç." % String(e["name"]).to_upper()
+		_after_shop_change()
+
+func _on_apply_enh_to_letter(ch: String) -> void:
+	var eid = state["run"].get("pendingEnhancement", null)
+	var r := Shop.apply_enhancement_to_letter(state, ch)
+	if r.get("ok", false):
+		_play_card_move()
+		var e = Enhancements.by_id(eid)
+		_shop_msg = "“%s” harfin %s oldu! (%s)" % [r["char"], String(e["name"]).to_upper(), e["desc"]]
+		_after_shop_change()
+
+# Destedeki benzersiz harfler + adetleri (cila hedef seçici için). Harf sırasına göre.
+func _deck_letter_counts() -> Array:
+	var counts := {}
+	for c in state["run"]["deck"]:
+		var ch: String = c["char"]
+		counts[ch] = int(counts.get(ch, 0)) + 1
+	var keys: Array = counts.keys()
+	keys.sort()
+	var out := []
+	for k in keys:
+		out.append({"char": k, "count": counts[k]})
+	return out
+
+func _on_buy_voucher() -> void:
+	if Shop.buy_voucher(state).get("ok", false):
+		_after_shop_change()
+
+func _on_next_blind() -> void:
+	_shop_mode = false
+	var res := Round.proceed_to_next_blind(state)
+	if res.get("runWon", false):
+		_open_win()
+		return
+	# Dükkân görünümünden OYUN görünümüne dön (sol panel + joker rafı kalır)
+	shop_view.visible = false
+	play_view.visible = true
+	if deck_holder:
+		deck_holder.visible = true  # yeni turda deste yine görünür
+	word_label.add_theme_color_override("font_color", T.TEXT)
+	_reset_flames()  # yeni tur → alev sıfırla (skorla tekrar yanar)
+	_refresh_hud()              # sol panel/joker güncelle
+	_open_blind_select()        # blind seçim ekranı (el SEÇ'te dağıtılır)
+
+# ── KAZAN / KAYBET ──
+func _open_win() -> void:
+	_clear_overlay()
+	_theme_overlay(Color(0.10, 0.07, 0.0, 0.78), T.BRASS)
+	overlay_card.add_child(_wavy_label("KAZANDIN! 🏆", 52, T.BRASS, T.OUTLINE, 10.0, 2.6, 6))
+	overlay_card.add_child(_center(_label("Tüm bölümleri geçtin.", 22, T.EMBER)))
+	_add_run_stats()
+	_add_end_buttons(true)
+	_present_overlay()
+
+func _open_lose() -> void:
+	_clear_overlay()
+	_theme_overlay(Color(0.22, 0.02, 0.02, 0.82), T.MULT)  # KIRMIZI game-over teması
+	overlay_card.add_child(_wavy_label("OYUN BİTTİ", 56, T.MULT, T.OUTLINE, 11.0, 2.6, 6))
+	_add_run_stats()
+	_add_end_buttons(false)
+	_present_overlay()
+
+# Balatro tarzı istatistik ızgarası — etiketli kutular (2 sütun) + "yenilen" bilgisi.
+func _add_run_stats() -> void:
+	var run: Dictionary = state["run"]
+	var stats: Dictionary = run.get("stats", {})
+	var defeated := String(state["round"]["blind"]["name"]) if run["status"] == "lost" else "—"
+	var best := "%s · %d" % [stats.get("bestWord", "—"), stats.get("bestScore", 0)]
+	if String(stats.get("bestWord", "")) == "":
+		best = "—"
+	# {etiket, değer, renk}
+	var cells := [
+		["En İyi El", best, T.BRASS],
+		["Yenilen", defeated.to_upper(), T.MULT],
+		["Oynanan Kelime", str(stats.get("words", 0)), T.CHIP_BADGE],
+		["Atılan Harf", str(stats.get("discards", 0)), T.CHIP_BADGE],
+		["Satın Alınan", str(stats.get("bought", 0)), T.GOOD],
+		["Reroll", str(stats.get("rerolls", 0)), T.GOOD],
+		["Bölüm", "%d / %d" % [run["ante"], state["config"]["maxAnte"]], T.ORANGE],
+		["Tur", str(run["blindIndex"] + 1), T.ORANGE],
+		["Kalan Para", "$%d" % run["money"], T.BRASS],
+		["Toplam Joker", str(run["jokers"].size()), T.LILAC],
+	]
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 12)
+	grid.add_theme_constant_override("v_separation", 8)
+	for cell in cells:
+		grid.add_child(_stat_cell(cell[0], cell[1], cell[2]))
+	overlay_card.add_child(grid)
+	# Seed (uzun olabilir) — ızgaranın altında tam genişlik, küçük, sığar.
+	var seed_lbl := _center(_label("Seed: %s" % String(run["seed"]), 13, T.TEXT_DIM))
+	seed_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	seed_lbl.custom_minimum_size = Vector2(468, 0)
+	overlay_card.add_child(seed_lbl)
+
+# Tek istatistik kutusu: koyu inset + üstte etiket + altta renkli değer.
+func _stat_cell(caption: String, value: String, color: Color) -> Control:
+	var p := PanelContainer.new()
+	p.add_theme_stylebox_override("panel", T.stat_inset())
+	p.custom_minimum_size = Vector2(228, 0)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 1)
+	var cap := _label(caption.to_upper(), 14, T.TEXT_DIM)
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var val := _label(value, 26, color, T.OUTLINE, 3)
+	val.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	val.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(cap)
+	v.add_child(val)
+	p.add_child(v)
+	return p
+
+func _add_end_buttons(won: bool) -> void:
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 6)
+	overlay_card.add_child(gap)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
+	var retry := _chunky_btn("TEKRAR DENE", T.GOOD, T.INK)
+	retry.custom_minimum_size = Vector2(0, 60)
+	retry.pressed.connect(_on_restart)
+	var menu := _chunky_btn("ANA MENÜ", T.ORANGE, T.INK)
+	menu.custom_minimum_size = Vector2(0, 60)
+	menu.pressed.connect(_on_back_to_menu)
+	row.add_child(retry)
+	row.add_child(menu)
+	overlay_card.add_child(row)
+
+func _on_restart() -> void:
+	_reset_to_play_view()
+	_init_run()
+	_refresh(true, true)
+
+func _on_back_to_menu() -> void:
+	_close_overlay()
+	request_menu.emit()
+
+const INFO_TEXT := "Harf taşlarından geçerli TÜRKÇE kelime kur → OYNA.\nSkor = ÇİP × ÇARPAN. Uzun kelime + jokerler skoru patlatır.\nHer turun HEDEF puanı var. Kelime HAKKIN + DEĞİŞİM hakkın sınırlı (değişim hak harcamaz).\nKullanılmayan harfler elde kalır. Patron turlarında özel kısıtlama olur."
+
+# BİLGİ butonu: kurallar + aktif patron kısıtlaması
+func _on_info_btn() -> void:
+	if _busy:
+		return
+	_clear_overlay()
+	overlay_card.add_child(_center(_label("BİLGİ", 40, T.EMBER, T.OUTLINE, 5)))
+	var round_d: Dictionary = state["round"]
+	var boss = round_d.get("boss", null)
+	if round_d["blind"].get("type", "") == "boss" and boss != null:
+		var bp := PanelContainer.new()
+		bp.add_theme_stylebox_override("panel", T.felt_panel(Color(0.30, 0.06, 0.05, 0.9), T.MULT, 12))
+		var bl := _label("⚠ PATRON — %s\n%s" % [String(boss["name"]).to_upper(), boss["description"]], 19, T.TEXT)
+		bl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		bl.custom_minimum_size = Vector2(560, 0)
+		bp.add_child(bl)
+		overlay_card.add_child(bp)
+	var body := _label(INFO_TEXT, 19, T.TEXT)
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.custom_minimum_size = Vector2(580, 0)
+	overlay_card.add_child(body)
+	var close := _chunky_btn("KAPAT", T.BRASS, T.INK)
+	close.custom_minimum_size = Vector2(0, 56)
+	close.pressed.connect(_close_overlay)
+	overlay_card.add_child(close)
+	_present_overlay()
+
+# MENÜ butonu: duraklat (devam / ana menü)
+func _on_menu_btn() -> void:
+	if _busy:
+		return
+	_clear_overlay()
+	overlay_card.add_child(_center(_label("DURAKLATILDI", 40, T.BRASS, T.OUTLINE, 5)))
+	overlay_card.add_child(_center(_label("Run devam ediyor.", 18, T.TEXT_DIM)))
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 8)
+	overlay_card.add_child(gap)
+	var resume := _chunky_btn("DEVAM ET", T.GOOD, T.INK)
+	resume.custom_minimum_size = Vector2(320, 58)
+	resume.pressed.connect(_close_overlay)
+	overlay_card.add_child(resume)
+	var to_menu := _chunky_btn("ANA MENÜ (run'ı bırak)", T.ORANGE, T.INK)
+	to_menu.custom_minimum_size = Vector2(320, 58)
+	to_menu.pressed.connect(_on_back_to_menu)
+	overlay_card.add_child(to_menu)
+	_present_overlay()
+
+# ── Test/yakalama kancaları (main.gd --shop / --lose) ──
+func demo_open_shop() -> void:
+	state["round"]["score"] = state["round"]["target"]
+	state["round"]["status"] = "won"
+	_open_shop()
+
+func demo_blind_select() -> void:
+	_open_blind_select()
+
+# Debug: dükkânı CİLA HARF SEÇİCİ açık göster (agency v2 görsel doğrulama).
+func demo_enh_picker() -> void:
+	state["round"]["score"] = state["round"]["target"]
+	state["round"]["status"] = "won"
+	_open_shop()
+	state["run"]["money"] = 99
+	var r := Shop.buy_enhancer(state)
+	var first: String = r["choices"][0]  # rastgele seçeneklerden ilki (foil havuzda olmayabilir)
+	Shop.choose_enhancement(state, first)
+	_after_shop_change()
+
+func demo_open_lose() -> void:
+	state["run"]["status"] = "lost"
+	_open_lose()
+
+func demo_cash_out() -> void:
+	state["round"]["score"] = state["round"]["target"]
+	state["round"]["status"] = "won"
+	state["round"]["playsLeft"] = 2
+	_open_cash_out()
+
+func demo_enhance() -> void:
+	var hand: Array = state["round"]["hand"]
+	var kinds := ["foil", "holo", "poly", "golden", "glass"]
+	for i in mini(hand.size(), kinds.size()):
+		hand[i]["enhancements"] = [kinds[i]]
+	_rebuild_hand(false, false)
+
+func demo_boss() -> void:
+	state["round"]["blind"] = {"type": "boss", "name": "Patron", "mult": 2.0}  # const'a yazma
+	state["round"]["boss"] = Bosses.by_id("uzun-yol")
+	_update_boss_banner()
+
+# Debug: rafa 4 joker ekle (sürükle-bırak yeniden sıralamayı görsel doğrulamak için).
+func demo_jokers() -> void:
+	for jid in ["katip", "unlu-uyumu", "z-faktoru", "cevher", "banker"]:
+		JokerActions.add_joker_by_id(state, jid)
+	_animate_jokers = true
+	_refresh(false, false)
