@@ -1,0 +1,27 @@
+; Wordeck — Türkçe kelime-roguelike (Kelimelik × Balatro), Godot 4.7
+; Yatay (landscape). Saf engine (engine/) + veri (data/) + UI (scripts/).
+
+config_version=5
+
+[application]
+
+config/name="Harf Destesi"
+run/main_scene="res://scenes/Main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+boot_splash/bg_color=Color(0.055, 0.165, 0.133, 1)
+
+[display]
+
+; Yatay (landscape) oyun
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/handheld/orientation="landscape"
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+
+[rendering]
+
+; Mobilde en geniş cihaz uyumu için GL Compatibility (OpenGL ES 3.0)
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/vram_compression/import_etc2_astc=true
