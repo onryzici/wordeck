@@ -57,7 +57,6 @@ var _bam := 0                    # ardışık katkı (op) → yükselen perdeli 
 var blind_header: Label
 var target_label: Label
 var round_score_label: Label
-var total_label: Label
 var deck_count_label: Label
 var tier_label: Label
 var chip_value: Label
@@ -101,11 +100,29 @@ var _shuffle_icon: TextureRect    # pixel-art shuffle ikonu
 var fx_layer: Node2D
 var shaker: Control
 
+# ── Trauma-tabanlı ekran sarsıntısı (Balatro hissi: trauma² × noise, zamanla decay) ──
+# Olaylar trauma EKLER (_add_trauma); _process her kare offset uygular ve trauma'yı söndürür.
+# Rastgele jitter DEĞİL — FastNoiseLite ile pürüzsüz, yönlü titreşim.
+var _trauma := 0.0
+var _shake_noise: FastNoiseLite
+var _noise_t := 0.0
+const SHAKE_MAX_OFFSET := 24.0  # trauma=1'de en büyük piksel kayması
+const TRAUMA_DECAY := 1.7       # saniyedeki sönme hızı
+const SHAKE_NOISE_SPEED := 16.0 # titreşim frekansı (gürültü örnekleme hızı)
+# Katmanlı trauma şiddetleri (küçük→orta→büyük). Tek yerden ayarlanır.
+const TRAUMA_TILE := 0.13   # normal harf taşı tetiklenince
+const TRAUMA_CHIP_OP := 0.09  # çip katkısı (foil vb.)
+const TRAUMA_MULT_OP := 0.34  # çarpan katkısı (joker/holo) — orta kick
+const TRAUMA_COLLIDE := 0.55  # çip×çarpan çarpışması
+
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	theme = T.make_theme(T.load_font())
 	_tile_font = T.load_font()  # pixel font + outline (prompt: bold pixel everywhere)
 	_spark_tex = _make_spark_tex()
+	_shake_noise = FastNoiseLite.new()
+	_shake_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_shake_noise.frequency = 1.0
 	_add_mat = CanvasItemMaterial.new()
 	_add_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
 	Settings.init()  # ses bus'ları + kalıcı ayarlar (idempotent; main de çağırır)
@@ -153,7 +170,8 @@ func _reset_flames() -> void:
 func _set_seal_flame(_seal, _on: bool) -> void:
 	pass
 
-# Alev boyunu (shader intensity) seal'in değer etiketine göre yumuşakça sürer (canlı, değer = boy).
+# Sıvı yüzeyin DALGA şiddetini (wobble_amp) değere göre yumuşakça sürer (canlı: değer = kaynama).
+# Sakin bir taban hep vardır; OYNA sonrası değer büyüdükçe yüzey daha çok kaynar.
 func _drive_seal_flame(seal) -> void:
 	if not (seal and is_instance_valid(seal) and seal.has_meta("crown")):
 		return
@@ -163,15 +181,14 @@ func _drive_seal_flame(seal) -> void:
 		return
 	var val := float(lbl.text) if lbl.text.is_valid_float() else 0.0
 	var ref: float = seal.get_meta("val_ref", 90.0)
-	# Alev YALNIZCA OYNA'da (önizlemede değil). Değer varsa BELİRGİN taban (~0.5) + değerle büyür (kullanıcı:
-	# "az olunca anlamsız, biraz daha fazla yap").
+	# Alev YALNIZCA puan alırken (OYNA sonrası, _flame_on) belirir; normalde 0 (kutu sade).
 	var target := 0.0
 	if _flame_on and val > 1.0:
 		target = clampf(0.5 + (val / ref) * 0.5, 0.0, 1.0)
 	var cur: float = seal.get_meta("flame_i", 0.0)
 	cur = lerpf(cur, target, 0.12)
 	if cur < 0.02:
-		cur = 0.0  # yumuşak geçiş (ani zıplama yok)
+		cur = 0.0  # tamamen sön (ani zıplama yok)
 	seal.set_meta("flame_i", cur)
 	(crown.material as ShaderMaterial).set_shader_parameter("intensity", cur)
 
@@ -371,13 +388,13 @@ func _build_left_panel() -> Control:
 	score_panel.add_child(sp)
 	v.add_child(score_panel)
 
-	# TOPLAM (çip×çarpan) — iri beyaz + kor glow (referanstaki "alev sayı")
-	total_label = _center(_label("0", 62, Color.WHITE, T.EMBER, 8))
-	total_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.add_child(total_label)
+	# Kademe (kelime tipi / seviye) — Balatro: çip×çarpan kutularının ÜSTÜNDE
+	tier_label = _center(_label("—", 22, T.ORANGE))
+	tier_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(tier_label)
 
-	var crown_gap := Control.new()  # pixel alev tacı için boşluk (skorla görünür, yükseldi)
-	crown_gap.custom_minimum_size = Vector2(0, 34)
+	var crown_gap := Control.new()  # alev tacı için küçük pay (skorda kutu üstünde belirir)
+	crown_gap.custom_minimum_size = Vector2(0, 12)
 	v.add_child(crown_gap)
 
 	var seals := HBoxContainer.new()
@@ -385,19 +402,15 @@ func _build_left_panel() -> Control:
 	seals.alignment = BoxContainer.ALIGNMENT_CENTER
 	chip_value = _center(_label("0", 50, Color.WHITE, T.CHIP_BADGE, 6))
 	mult_value = _center(_label("1", 50, Color.WHITE, T.MULT, 6))
-	chip_seal_panel = _seal("ÇİP", chip_value, T.CHIP, Vector2(140, 86), 90.0)
-	mult_seal_panel = _seal("ÇARPAN", mult_value, T.MULT, Vector2(140, 86), 14.0)
+	chip_seal_panel = _seal(chip_value, T.CHIP, Vector2(140, 86), 90.0)
+	mult_seal_panel = _seal(mult_value, T.MULT, Vector2(140, 86), 14.0)
 	seals.add_child(chip_seal_panel)
-	seals.add_child(_center(_label("×", 34, T.TEXT_DIM)))
+	seals.add_child(_center(_label("×", 60, T.TEXT)))  # büyük çarpı işareti
 	seals.add_child(mult_seal_panel)
 	v.add_child(seals)
 
-	tier_label = _center(_label("—", 22, T.ORANGE))
-	tier_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.add_child(tier_label)
-
 	var gap := Control.new()
-	gap.custom_minimum_size = Vector2(0, 2)
+	gap.custom_minimum_size = Vector2(0, 6)
 	v.add_child(gap)
 
 	# Alt blok — referans: solda 2 chunky buton, sağda etiket+girintili-değer panelleri.
@@ -536,47 +549,44 @@ func _chunky_btn(text: String, color: Color, fg: Color) -> Button:
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return b
 
-func _seal(caption: String, value_label: Label, color: Color, msize: Vector2, val_ref: float) -> Control:
-	# Kutu + üstte pixel alev TACI. Alev HER ZAMAN yanar; boyu DEĞERLE büyür (val_ref = "tam alev" eşiği).
+func _seal(value_label: Label, color: Color, msize: Vector2, val_ref: float) -> Control:
+	# Temiz DOLU kutu (eski radius) + ÜSTÜNDE PUAN ALIRKEN beliren blobby alev tacı.
+	# Normalde alev YOK (kutu sade); OYNA'da değere göre belirir. Yazı/etiket yok, sadece sayı.
 	var root := Control.new()
 	root.custom_minimum_size = msize
-	root.clip_contents = false
+	root.clip_contents = false  # alev kutu üstüne taşabilsin
 
 	var box := Panel.new()
 	box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	box.add_theme_stylebox_override("panel", T.seal(color))
+	box.add_theme_stylebox_override("panel", T.seal(color))  # eski güzel radius (10)
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(box)
 
-	# Pixel alev tacı — HER ZAMAN görünür; intensity (alev boyu) _process'te değere göre sürülür.
-	var crown_h := 42.0
-	var inset := 14.0
+	# Alev tacı — kutunun hemen üstünde; intensity (boy) _drive_seal_flame'de PUAN'a göre sürülür.
+	var crown_h := 40.0
+	var inset := 12.0
 	var crown := ColorRect.new()
+	crown.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # pixel keskin kalsın
 	crown.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	crown.position = Vector2(inset, -crown_h + 2.0)
+	crown.position = Vector2(inset, -crown_h + 3.0)  # tabanı kutu üst kenarına bitişik (dikişsiz)
 	crown.size = Vector2(msize.x - inset * 2.0, crown_h)
 	var fm := ShaderMaterial.new()
 	fm.shader = load("res://shaders/box_flame.gdshader")
 	fm.set_shader_parameter("flame_color", Color(color.r, color.g, color.b, 1.0))
-	fm.set_shader_parameter("intensity", 0.0)
+	fm.set_shader_parameter("intensity", 0.0)  # başta alev YOK
 	crown.material = fm
 	root.add_child(crown)
 	root.set_meta("crown", crown)
 	root.set_meta("val_label", value_label)  # alev boyunu sürecek değer
 	root.set_meta("val_ref", val_ref)        # bu değerde alev tam boy
-	root.set_meta("flame_i", 0.0)            # başta ALEV YOK; değerle yükselir
+	root.set_meta("flame_i", 0.0)            # başta 0; puanla yükselir
 
-	var v := VBoxContainer.new()
-	v.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	v.alignment = BoxContainer.ALIGNMENT_CENTER
-	v.add_theme_constant_override("separation", 0)
-	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var cap := _center(_label(caption, 22, Color(1, 1, 1, 0.9)))
-	cap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.add_child(cap)
-	v.add_child(value_label)
-	root.add_child(v)
+	# Sadece SAYI — kutu gövdesinde tam ortalı (ÇİP/ÇARPAN yazısı yok)
+	value_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	value_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(value_label)
 	return root
 
 # ── SAĞ ──
@@ -1027,12 +1037,39 @@ func _make_tile(card: Dictionary) -> Control:
 		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		visual.add_child(badge)
+		# SÜREKLİ PARILTI (specular sweep) — enhancement renginde, glow değil
+		var shim := ColorRect.new()
+		shim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		shim.offset_left = 7
+		shim.offset_top = 7
+		shim.offset_right = -7
+		shim.offset_bottom = -7
+		shim.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		shim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var smat := ShaderMaterial.new()
+		smat.shader = load("res://shaders/tile_shimmer.gdshader")
+		smat.set_shader_parameter("tint", Color(ecol.r, ecol.g, ecol.b, 1.0))
+		shim.material = smat
+		visual.add_child(shim)
+		tile.set_meta("enh_color", ecol)  # oynanınca renkli kıvılcım için
 
 	tile.gui_input.connect(_on_tile_input.bind(int(card["id"])))
 	return tile
 
 # Sürekli hafif 3D float — kartlar "yaşıyor" hissi (Balatro tarzı).
 func _process(_delta: float) -> void:
+	# Trauma-tabanlı ekran sarsıntısı — erken return'lerden ÖNCE uygulanır (her zaman çalışsın).
+	if shaker != null:
+		if _trauma > 0.0:
+			_noise_t += _delta
+			var shake := _trauma * _trauma  # karesel: küçük trauma yumuşak, büyük trauma vurucu
+			var s := _noise_t * SHAKE_NOISE_SPEED
+			var nx := _shake_noise.get_noise_2d(s, 0.0)
+			var ny := _shake_noise.get_noise_2d(0.0, s)
+			shaker.position = Vector2(nx, ny) * (SHAKE_MAX_OFFSET * shake)
+			_trauma = maxf(0.0, _trauma - TRAUMA_DECAY * _delta)
+		elif shaker.position != Vector2.ZERO:
+			shaker.position = Vector2.ZERO  # sıfıra otur (drift olmasın)
 	var t := Time.get_ticks_msec() / 1000.0
 	_update_living_text(t)  # başlık/önemli yazılar sürekli hafif oynaşır (Balatro hissi)
 	_drive_seal_flame(chip_seal_panel)   # alev boyu = ÇİP değeri (canlı)
@@ -1434,14 +1471,12 @@ func _update_word_display() -> void:
 		var res := Scoring.score_word(state, cards, true)
 		chip_value.text = str(res["chips"])
 		mult_value.text = _fmt(res["mult"])
-		total_label.text = str(res["score"])
 		tier_label.text = "%s  ·  ×%s" % [res["tier"]["label"], _fmt(res["tier"]["mult"])]
 		_set_play_ready(true)
 		_start_pulse()
 	else:
 		chip_value.text = "0"
 		mult_value.text = "1"
-		total_label.text = "0"
 		if cards.size() > 0:
 			var t := WordTiers.tier_for(cards.size())
 			tier_label.text = "%s  ·  ×%s" % [t["label"], _fmt(t["mult"])]
@@ -1605,7 +1640,7 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 				var jcard := _find_joker_card(String(step.get("id", "")))
 				var src_pos: Vector2
 				if jcard != null:
-					_pop(jcard, 1.24)
+					_juice_joker(jcard)  # squash/stretch zıplama (karakter)
 					_ember_burst(_node_center(jcard), 10, 2.6)
 					src_pos = _node_center(jcard) + Vector2(0, -jcard.size.y * 0.5 - 18.0)
 				else:
@@ -1622,13 +1657,11 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 	mult_value.text = _fmt(res["mult"])
 	_pop(chip_seal_panel, 1.16)
 	_pop(mult_seal_panel, 1.16)
-	var mid := _node_center(total_label)
-	var big: int = clampi(int(res["score"]) / 18 + 26, 26, 96)
-	_flash_ring(mid, 8.0, Color(T.EMBER.r, T.EMBER.g, T.EMBER.b, 0.8))
-	_ember_burst(mid, big, 4.0)
+	# ÇİP ve ÇARPAN kutuları "×" işaretinde çarpışsın → ardından GEÇİCİ büyük SLAM (turuncu kutu kalktı)
+	await _collide_seals()
+	var mid := (_node_center(chip_seal_panel) + _node_center(mult_seal_panel)) * 0.5  # çarpışma noktası
 	_shake(min(11.0, 4.0 + res["score"] / 80.0), 0.38)
-	_count_label(total_label, int(res["score"]), 0.45)
-	_pop(total_label, 1.42)  # daha tok patlama
+	_slam_score(mid, int(res["score"]))  # vurucu geçici SLAM (font + partikül + halka içeride)
 	_play_collect(_collect_big, 1.0)  # final toplam çanı
 	# (Kutlama yazısı KALDIRILDI — kullanıcı "kötü duruyor" dedi; _praise_banner artık çağrılmıyor)
 	await get_tree().create_timer(0.35).timeout
@@ -1649,10 +1682,12 @@ func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float) 
 		_count_label(chip_value, run_chip, 0.14)
 		_pop(chip_seal_panel, 1.2)
 		_ember_burst(_node_center(chip_seal_panel), 9, 2.4)
+		_add_trauma(TRAUMA_CHIP_OP)  # çip katkısı: ufak
 	else:
 		mult_value.text = _fmt(run_mult)
 		_pop(mult_seal_panel, 1.22)
 		_ember_burst(_node_center(mult_seal_panel), 11, 2.8)
+		_add_trauma(TRAUMA_MULT_OP)  # çarpan katkısı: orta kick
 	_bam_sound()
 
 # op SONRASI çip değeri (görsel sayaç için engine matematiğini yansıtır).
@@ -1681,6 +1716,10 @@ func _fire_tile(tile: Control, gain: int) -> void:
 	tw.tween_property(tile, "scale", Vector2(1.22, 1.22), 0.08).set_trans(Tween.TRANS_BACK)
 	tw.tween_property(tile, "scale", Vector2.ONE, 0.12)
 	_ember_burst(_node_center(tile), 12, 3.0)
+	# Geliştirilmiş taş (foil/holo/cam…) → ekstra RENKLİ kıvılcım (özel his)
+	if tile.has_meta("enh_color"):
+		_ember_burst(_node_center(tile), 14, 3.2, null, tile.get_meta("enh_color"))
+	_add_trauma(TRAUMA_TILE)  # her taşta küçük his
 	if _ui_sfx and _blink:           # harf "blink" sesi (kullanıcı ekledi) — her puan gelişinde
 		_ui_sfx.stream = _blink
 		_ui_sfx.pitch_scale = 1.0   # op zinciri perdeyi yükseltmiş olabilir → taban perdeye dön
@@ -1896,6 +1935,21 @@ func _pop(node: Control, amount: float) -> void:
 	tw.tween_property(node, "scale", Vector2(amount, amount), 0.08).set_trans(Tween.TRANS_BACK)
 	tw.tween_property(node, "scale", Vector2.ONE, 0.14)
 
+# Joker tetiklenince KARAKTERLİ zıplama: anticipation squash → stretch'le zıpla → in iniş → otur.
+# (Sadece scale + position:y — _process joker rotasyonunu her kare ezdiği için rotasyona dokunmuyoruz.)
+func _juice_joker(card: Control) -> void:
+	if not is_instance_valid(card):
+		return
+	card.pivot_offset = card.size / 2.0
+	var y0 := card.position.y
+	var tw := create_tween()
+	tw.tween_property(card, "scale", Vector2(1.2, 0.82), 0.06).set_trans(Tween.TRANS_QUAD)   # çömel (anticipation)
+	tw.tween_property(card, "scale", Vector2(0.84, 1.24), 0.09).set_trans(Tween.TRANS_QUAD)  # uzayarak zıpla
+	tw.parallel().tween_property(card, "position:y", y0 - 20.0, 0.09).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(card, "scale", Vector2(1.14, 0.92), 0.08)                              # iniş squash
+	tw.parallel().tween_property(card, "position:y", y0, 0.08).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.tween_property(card, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_BACK)          # otur
+
 func _count_label(label: Label, to: int, dur: float) -> void:
 	var from := int(label.text) if label.text.is_valid_int() else 0
 	var tw := create_tween()
@@ -1912,15 +1966,120 @@ func _flash_color(label: Label, flash_color: Color, dur: float) -> void:
 func _node_center(node: Control) -> Vector2:
 	return node.global_position + node.size / 2.0
 
-func _shake(amount: float, dur: float) -> void:
+# ── ÇİP × ÇARPAN çarpışması (final beat) ──
+# Gerçek seal panelleri YERİNDE kalır (layout bozulmaz); iki "hayalet" rozet
+# kutulardan ortadaki "×" noktasına kayıp çarpışır → kor patlaması + halka + trauma.
+func _collide_seals() -> void:
+	if not is_instance_valid(chip_seal_panel) or not is_instance_valid(mult_seal_panel):
+		return
+	var chip_c := _node_center(chip_seal_panel)
+	var mult_c := _node_center(mult_seal_panel)
+	var meet := (chip_c + mult_c) * 0.5  # "×" işaretinin bulunduğu orta nokta
+	var g_chip := _seal_ghost(chip_c, chip_value.text, T.CHIP_BADGE)
+	var g_mult := _seal_ghost(mult_c, "×" + mult_value.text, T.MULT)
+	# 1) İçeri hızlanarak yaklaş (ease-in → çarpışma vurgusu)
+	var dur := 0.24
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(g_chip, "global_position", meet - g_chip.size * 0.5, dur).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	tw.tween_property(g_mult, "global_position", meet - g_mult.size * 0.5, dur).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	tw.tween_property(g_chip, "scale", Vector2(1.18, 1.18), dur)
+	tw.tween_property(g_mult, "scale", Vector2(1.18, 1.18), dur)
+	await tw.finished
+	# 2) ÇARPIŞMA: kor + halka + orta trauma
+	_ember_burst(meet, 24, 3.6)
+	_flash_ring(meet, 7.0, Color(T.EMBER.r, T.EMBER.g, T.EMBER.b, 0.85))
+	_add_trauma(TRAUMA_COLLIDE)
+	# 3) Hayaletler bir an punch yapıp sönsün
+	var pt := create_tween()
+	pt.set_parallel(true)
+	pt.tween_property(g_chip, "scale", Vector2(1.45, 1.45), 0.08).set_trans(Tween.TRANS_BACK)
+	pt.tween_property(g_mult, "scale", Vector2(1.45, 1.45), 0.08).set_trans(Tween.TRANS_BACK)
+	pt.chain().tween_property(g_chip, "modulate:a", 0.0, 0.12)
+	pt.parallel().tween_property(g_mult, "modulate:a", 0.0, 0.12)
+	pt.chain().tween_callback(g_chip.queue_free)
+	pt.tween_callback(g_mult.queue_free)
+	await get_tree().create_timer(0.12).timeout
+
+# Çarpışma için tek kullanımlık "rozet" hayaleti: dönük karo + büyük puan (fx_layer'da).
+# center = global merkez; holder merkezi oraya oturur (tween global_position ile taşınır).
+func _seal_ghost(center: Vector2, value_text: String, color: Color) -> Control:
+	var holder := Control.new()
+	holder.z_index = 48
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.size = Vector2(120, 96)
+	holder.pivot_offset = holder.size * 0.5
+	fx_layer.add_child(holder)
+	holder.global_position = center - holder.size * 0.5
+	# karo zemin
+	var dia := Panel.new()
+	var dsb := StyleBoxFlat.new()
+	dsb.bg_color = Color(color.r, color.g, color.b, 0.42)
+	dsb.set_corner_radius_all(0)
+	dsb.anti_aliasing = false
+	dia.add_theme_stylebox_override("panel", dsb)
+	var dsz := 78.0
+	dia.size = Vector2(dsz, dsz)
+	dia.position = holder.size * 0.5 - Vector2(dsz, dsz) * 0.5
+	dia.pivot_offset = Vector2(dsz, dsz) * 0.5
+	dia.rotation = deg_to_rad(45.0)
+	dia.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(dia)
+	# puan
+	var lbl := _label(value_text, 50, Color.WHITE, Color(0.05, 0.03, 0.04), 6)
+	lbl.add_theme_font_override("font", _tile_font)
+	lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(lbl)
+	return holder
+
+# Turuncu TOPLAM kutusu kalktı → final sonucu EKRANDA geçici büyük SLAM ile göster:
+# 2.0→0.95→1.0 patlama + count-up, kısa bekle, yükselip sön (fx_layer'da, kalıcı değil).
+func _slam_score(center: Vector2, score: int) -> void:
+	var lbl := _label("0", 84, Color.WHITE, T.EMBER, 10)
+	# ÖNEMLİ: fx_layer bir Node2D → Control teması (font) MİRAS ALINMAZ. Oyunun ana sayı
+	# fontunu (m6x11) elle ver ki çip/çarpan/tur-skoru ile TUTARLI olsun.
+	lbl.add_theme_font_override("font", _tile_font)
+	lbl.z_index = 50
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lbl.size = Vector2(320, 120)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	fx_layer.add_child(lbl)
+	lbl.pivot_offset = lbl.size * 0.5
+	lbl.global_position = center - lbl.size * 0.5
+
+	# VURUCU çarpma anı: kor patlaması + halka + kısa parlak flash
+	_ember_burst(center, clampi(score / 14 + 18, 18, 64), 3.6)
+	_flash_ring(center, 7.0, Color(T.EMBER.r, T.EMBER.g, T.EMBER.b, 0.85))
+
+	# SLAM: büyükten SERT otur (2.3→0.9→1.0) + parlak başlayıp normale dön
+	lbl.scale = Vector2(2.3, 2.3)
+	lbl.modulate = Color(1.5, 1.4, 1.2)
+	var tw := create_tween()
+	tw.tween_property(lbl, "scale", Vector2(0.9, 0.9), 0.12).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(lbl, "modulate", Color.WHITE, 0.18)
+	tw.tween_property(lbl, "scale", Vector2.ONE, 0.10)
+	_count_label(lbl, score, 0.28)
+
+	var life := create_tween()  # kısa bekle → yüksel + sön → temizle
+	life.tween_interval(0.7)
+	life.tween_property(lbl, "global_position:y", lbl.global_position.y - 30.0, 0.4).set_trans(Tween.TRANS_SINE)
+	life.parallel().tween_property(lbl, "modulate:a", 0.0, 0.35)
+	life.tween_callback(lbl.queue_free)
+
+# Eski API korunur: piksel "amount" → trauma'ya çevrilir (çağrı noktaları değişmez).
+# Artık ani jitter değil; trauma birikip _process'te pürüzsüz sönerek uygulanır.
+func _shake(amount: float, _dur: float) -> void:
+	_add_trauma(clampf(amount / 14.0, 0.0, 0.85))
+
+# Trauma ekle (0..1'e clamp). Ayar kapalıysa hiç birikmez.
+func _add_trauma(amount: float) -> void:
 	if not Settings.shake_on:
 		return
-	var tw := create_tween()
-	var steps := 6
-	for i in steps:
-		var off := Vector2(randf_range(-amount, amount), randf_range(-amount, amount))
-		tw.tween_property(shaker, "position", off, dur / steps)
-	tw.tween_property(shaker, "position", Vector2.ZERO, dur / steps)
+	_trauma = clampf(_trauma + amount, 0.0, 1.0)
 
 # ── Partikül (kor/alev) ──
 func _make_spark_tex() -> Texture2D:
@@ -1938,11 +2097,11 @@ func _make_spark_tex() -> Texture2D:
 	tex.height = 32
 	return tex
 
-func _ember_burst(global_pos: Vector2, amount: int, max_scale: float) -> void:
+func _ember_burst(global_pos: Vector2, amount: int, max_scale: float, parent: Node = null, tint = null) -> void:
 	if not Settings.particles_on:
 		return
 	var p := CPUParticles2D.new()
-	fx_layer.add_child(p)
+	(parent if parent != null else fx_layer).add_child(p)  # overlay üstünde göstermek için parent verilebilir
 	p.global_position = global_pos
 	p.texture = _spark_tex
 	p.material = _add_mat  # additive → parlayan kor/alev
@@ -1965,10 +2124,17 @@ func _ember_burst(global_pos: Vector2, amount: int, max_scale: float) -> void:
 	sc.add_point(Vector2(1.0, 0.0))
 	p.scale_amount_curve = sc
 	var ramp := Gradient.new()
-	ramp.set_color(0, Color(1.0, 0.95, 0.75))  # sıcak beyaz çekirdek
-	ramp.add_point(0.35, T.EMBER)
-	ramp.add_point(0.75, T.MULT)
-	ramp.set_color(1, Color(T.MULT.r, T.MULT.g, T.MULT.b, 0.0))
+	if tint != null:
+		# Renkli kıvılcım (geliştirilmiş taş tetiklemesi: foil mavi, holo mor, altın sarı…)
+		var tc: Color = tint
+		ramp.set_color(0, Color(1.0, 1.0, 1.0))  # beyaz çekirdek
+		ramp.add_point(0.4, tc)
+		ramp.set_color(1, Color(tc.r, tc.g, tc.b, 0.0))
+	else:
+		ramp.set_color(0, Color(1.0, 0.95, 0.75))  # sıcak beyaz çekirdek
+		ramp.add_point(0.35, T.EMBER)
+		ramp.add_point(0.75, T.MULT)
+		ramp.set_color(1, Color(T.MULT.r, T.MULT.g, T.MULT.b, 0.0))
 	p.color_ramp = ramp
 	p.finished.connect(p.queue_free)
 
@@ -2535,12 +2701,26 @@ func _animate_blind_columns(row: Control) -> void:
 	await get_tree().process_frame
 	var i := 0
 	for col in row.get_children():
-		col.pivot_offset = col.size / 2.0
+		col.pivot_offset = col.size / 2.0  # scale merkezi (springy giriş)
 		col.modulate.a = 0.0
-		col.position.y += 40.0
+		col.position.y += 52.0
+		col.scale = Vector2(0.86, 0.86)
+		var d := i * 0.09
 		var tw := create_tween().set_parallel(true)
-		tw.tween_property(col, "modulate:a", 1.0, 0.25).set_delay(i * 0.08)
-		tw.tween_property(col, "position:y", col.position.y - 40.0, 0.4).set_delay(i * 0.08).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(col, "modulate:a", 1.0, 0.22).set_delay(d)
+		# yaylanarak yüksel + büyü (squash/stretch + overshoot)
+		tw.tween_property(col, "position:y", col.position.y - 52.0, 0.46).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(col, "scale", Vector2.ONE, 0.46).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		# GEÇİLDİ damgası: gecikmeli "slap" (büyükten sert otur)
+		if col.has_meta("stamp"):
+			var st: Control = col.get_meta("stamp")
+			if is_instance_valid(st):
+				st.pivot_offset = st.size / 2.0
+				st.scale = Vector2(2.2, 2.2)
+				st.modulate.a = 0.0
+				var stw := create_tween().set_parallel(true)
+				stw.tween_property(st, "modulate:a", 1.0, 0.12).set_delay(d + 0.32)
+				stw.tween_property(st, "scale", Vector2.ONE, 0.22).set_delay(d + 0.32).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 		i += 1
 
 # Tek blind KOLONU (uzun dikey panel): üstte SEÇ, isim sekmesi, ikon rozeti, hedef+ödül, "veya", altta ATLA.
@@ -2561,6 +2741,12 @@ func _blind_column(blind: Dictionary, i: int, cur: int) -> Control:
 	sb.border_width_top = 4 if active else 2
 	sb.border_width_bottom = 0  # alt kenar yok (yapışık)
 	sb.border_color = accent if active else Color(accent.r, accent.g, accent.b, 0.35)
+	# Aktif kolon vurgusu: kalın kenarlık + renk (glow YOK — kullanıcı glow istemiyor).
+	# Boss aktifse kenarlık KIRMIZI (tehdit hissi, glow'suz).
+	if active and blind["type"] == "boss":
+		sb.set_border_width_all(5)
+		sb.border_width_bottom = 0
+		sb.border_color = T.MULT
 	sb.content_margin_left = 18
 	sb.content_margin_right = 18
 	sb.content_margin_top = 16
@@ -2659,7 +2845,7 @@ func _blind_column(blind: Dictionary, i: int, cur: int) -> Control:
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	v.add_child(spacer)
 	if done:
-		v.add_child(_center(_label("✓ GEÇİLDİ", 18, T.GOOD)))
+		pass  # geçilmiş kolon → büyük "GEÇİLDİ" damgası (aşağıda overlay, animate'te slap)
 	elif active and blind["type"] != "boss":
 		v.add_child(_center(_label("— veya —", 14, T.TEXT_DIM)))
 		var skip := _chunky_btn("🏷  ATLA", T.MULT, Color.WHITE)
@@ -2670,6 +2856,17 @@ func _blind_column(blind: Dictionary, i: int, cur: int) -> Control:
 	elif not active:
 		v.add_child(_center(_label("SIRADA", 15, T.TEXT_DIM)))
 	col.add_child(v)
+	# GEÇİLDİ damgası (overlay) — done kolonda büyük, döndürülmüş; _animate'te "slap" olur
+	if done:
+		var stamp := _label("GEÇİLDİ", 36, Color(1, 1, 1, 0.95), Color(0.10, 0.05, 0.05, 0.95), 6)
+		stamp.add_theme_font_override("font", _tile_font)
+		stamp.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		stamp.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		stamp.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		stamp.rotation = deg_to_rad(-12.0)
+		stamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(stamp)
+		col.set_meta("stamp", stamp)
 	if not active:
 		col.modulate.a = 0.7  # geçili/sıradaki sönük
 	return col
@@ -3185,9 +3382,289 @@ func _on_reroll() -> void:
 		_play_shuffle()
 		_after_shop_change()
 
+# ══ BOOSTER PAKET AÇMA SEKANSI (Balatro tarzı: giriş→yırtılma→yelpaze→seçim→yanma) ══
+# kind: "letter" (choices = harf string'leri) | "enh" (choices = enhancement id'leri).
+# Tam ekran overlay; seçim yapılınca chosen uçar, kalanlar YANAR, sonra ilgili handler çağrılır.
+func _open_pack_sequence(choices, kind: String) -> void:
+	if choices == null or (choices is Array and choices.is_empty()):
+		_after_shop_change()
+		return
+	var center := size * 0.5
+	# Overlay katmanları: dim (alt) → hold (kartlar) → seqfx (partikül, üst)
+	var ov := Control.new()
+	ov.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ov.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(ov)
+	var dim := ColorRect.new()
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color(0, 0, 0, 0)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	ov.add_child(dim)
+	var hold := Control.new()
+	hold.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ov.add_child(hold)
+	var seqfx := Node2D.new()
+	ov.add_child(seqfx)  # en üstte → partiküller kartların önünde
+	create_tween().tween_property(dim, "color", Color(0, 0, 0, 0.8), 0.25)
+
+	# 1) GİRİŞ — kapalı paket aşağıdan uçar, overshoot, oturur (squash/stretch)
+	var pack := _pack_sealed_card(kind)
+	hold.add_child(pack)
+	pack.pivot_offset = pack.size * 0.5
+	var pack_home := center - pack.size * 0.5
+	pack.position = pack_home + Vector2(0, 540)
+	pack.scale = Vector2(0.7, 0.7)
+	_play_card_move()  # whoosh
+	var e1 := create_tween().set_parallel(true)
+	e1.tween_property(pack, "position", pack_home, 0.42).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	e1.tween_property(pack, "scale", Vector2.ONE, 0.42).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	await e1.finished
+	_add_trauma(0.18)
+	var sq := create_tween()
+	sq.tween_property(pack, "scale", Vector2(1.12, 0.9), 0.07)
+	sq.tween_property(pack, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_BACK)
+	await sq.finished
+	# 2) BEKLEME — kısa bob
+	var bob := create_tween()
+	bob.tween_property(pack, "position:y", pack_home.y - 10.0, 0.22).set_trans(Tween.TRANS_SINE)
+	bob.tween_property(pack, "position:y", pack_home.y, 0.22).set_trans(Tween.TRANS_SINE)
+	await bob.finished
+	# 3) YIRTILMA — flash + konfeti/ember + paket büyüyüp kaybolur
+	_ember_burst(center, 46, 4.0, seqfx)
+	_add_trauma(0.4)
+	_play_collect(_collect, 1.0)
+	var flash := ColorRect.new()
+	flash.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	flash.color = Color(1, 1, 1, 0.0)
+	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ov.add_child(flash)
+	var ft := create_tween()
+	ft.tween_property(flash, "color:a", 0.45, 0.06)
+	ft.tween_property(flash, "color:a", 0.0, 0.22)
+	ft.tween_callback(flash.queue_free)
+	var tr := create_tween().set_parallel(true)
+	tr.tween_property(pack, "scale", Vector2(1.5, 1.5), 0.16)
+	tr.tween_property(pack, "modulate:a", 0.0, 0.16)
+	await tr.finished
+	if is_instance_valid(pack):
+		pack.queue_free()
+	# 4) YELPAZE — kartlar paket merkezinden yaylanarak yaya açılır (stagger)
+	var n: int = choices.size()
+	var spacing := 174.0
+	var cards: Array = []
+	for i in n:
+		var card := _pack_overlay_card(kind, choices[i])
+		hold.add_child(card)
+		card.pivot_offset = card.size * 0.5
+		var off := i - (n - 1) / 2.0
+		var tpos := Vector2(center.x + off * spacing, center.y + off * off * 10.0) - card.size * 0.5
+		var trot := off * 0.12
+		card.position = center - card.size * 0.5
+		card.scale = Vector2(0.3, 0.3)
+		var d := i * 0.06
+		var ct := create_tween().set_parallel(true)
+		ct.tween_property(card, "position", tpos, 0.42).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		ct.tween_property(card, "scale", Vector2.ONE, 0.42).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		ct.tween_property(card, "rotation", trot, 0.42).set_delay(d).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		cards.append(card)
+		var hit := Button.new()
+		hit.flat = true
+		hit.focus_mode = Control.FOCUS_NONE
+		hit.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		card.add_child(hit)
+		hit.mouse_entered.connect(_pack_card_hover.bind(card, trot, true))
+		hit.mouse_exited.connect(_pack_card_hover.bind(card, trot, false))
+		hit.pressed.connect(_resolve_pack_pick.bind(ov, seqfx, cards, card, choices[i], kind))
+	# "X'TEN 1 SEÇ" başlığı yukarıda belirir
+	var sel := _label("%d'TEN 1 SEÇ" % n, 32, T.BRASS, T.OUTLINE, 6)
+	sel.add_theme_font_override("font", _tile_font)
+	sel.size = Vector2(420, 50)
+	sel.position = Vector2(center.x - 210.0, center.y - 230.0)
+	sel.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sel.modulate.a = 0.0
+	hold.add_child(sel)
+	create_tween().tween_property(sel, "modulate:a", 1.0, 0.3).set_delay(0.2)
+
+# Kapalı paket görseli (giriş için).
+func _pack_sealed_card(kind: String) -> Control:
+	var card := Panel.new()
+	card.size = Vector2(154, 200)
+	var accent := T.GOOD if kind == "letter" else T.CHIP
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = accent.darkened(0.12)
+	sb.set_corner_radius_all(12)
+	sb.set_border_width_all(4)
+	sb.border_color = accent.lightened(0.2)
+	sb.shadow_color = Color(0, 0, 0, 0.5)
+	sb.shadow_size = 10
+	sb.shadow_offset = Vector2(0, 6)
+	card.add_theme_stylebox_override("panel", sb)
+	var l := _label("HARF\nPAKETİ" if kind == "letter" else "CİLA\nPAKETİ", 26, Color.WHITE, T.OUTLINE, 5)
+	l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	card.add_child(l)
+	return card
+
+# Yelpaze kartı (seçenek): harf büyük / enhancement sembol+isim+açıklama.
+func _pack_overlay_card(kind: String, choice) -> Control:
+	var card := Panel.new()
+	card.size = Vector2(128, 172)
+	var sb := StyleBoxFlat.new()
+	var accent: Color
+	if kind == "letter":
+		sb.bg_color = T.CARD_FACE
+		accent = T.BRASS
+	else:
+		var e = Enhancements.by_id(choice)
+		accent = Color(e["color"])
+		sb.bg_color = T.FELT_700
+	sb.set_corner_radius_all(10)
+	sb.set_border_width_all(3)
+	sb.border_color = accent
+	sb.shadow_color = Color(0, 0, 0, 0.5)
+	sb.shadow_size = 6
+	sb.shadow_offset = Vector2(0, 4)
+	card.add_theme_stylebox_override("panel", sb)
+	if kind == "letter":
+		var l := _label(String(choice), 66, T.INK)
+		l.add_theme_font_override("font", _tile_font)
+		l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card.add_child(l)
+	else:
+		var e = Enhancements.by_id(choice)
+		var vb := VBoxContainer.new()
+		vb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		vb.alignment = BoxContainer.ALIGNMENT_CENTER
+		vb.add_theme_constant_override("separation", 6)
+		vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(_center(_label(String(e["symbol"]), 44, accent)))
+		vb.add_child(_center(_label(String(e["name"]).to_upper(), 15, accent)))
+		var d := _center(_label(String(e["desc"]), 12, T.TEXT_DIM))
+		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		d.custom_minimum_size = Vector2(118, 0)
+		vb.add_child(d)
+		card.add_child(vb)
+	return card
+
+# Yelpaze kartı hover: büyü + düzleş (glow YOK).
+func _pack_card_hover(card: Control, base_rot: float, on: bool) -> void:
+	if not is_instance_valid(card):
+		return
+	var t := create_tween().set_parallel(true)
+	t.tween_property(card, "scale", Vector2(1.1, 1.1) if on else Vector2.ONE, 0.1).set_trans(Tween.TRANS_BACK)
+	t.tween_property(card, "rotation", 0.0 if on else base_rot, 0.1)
+
+# Seçim: chosen pop+uç, kalanlar YAN, overlay kapanır, sonra ilgili handler.
+func _resolve_pack_pick(ov: Control, seqfx: Node2D, cards: Array, chosen: Control, choice, kind: String) -> void:
+	if not is_instance_valid(ov) or ov.get_meta("done", false):
+		return
+	ov.set_meta("done", true)
+	_add_trauma(0.3)
+	for c in cards:
+		if not is_instance_valid(c):
+			continue
+		if c == chosen:
+			_ember_burst(_node_center(c), 24, 3.0, seqfx)
+			var pt := create_tween().set_parallel(true)
+			pt.tween_property(c, "scale", Vector2(1.25, 1.25), 0.1).set_trans(Tween.TRANS_BACK)
+			pt.tween_property(c, "rotation", 0.0, 0.1)
+			pt.chain().tween_property(c, "position:y", c.position.y - 90.0, 0.35).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+			pt.parallel().tween_property(c, "modulate:a", 0.0, 0.3).set_delay(0.12)
+		else:
+			_burn_card(c, seqfx)
+	await get_tree().create_timer(0.55).timeout
+	if is_instance_valid(ov):
+		var ot := create_tween()
+		ot.tween_property(ov, "modulate:a", 0.0, 0.25)
+		await ot.finished
+		if is_instance_valid(ov):
+			ov.queue_free()
+	# Seçimi uygula (state + shop yeniden kurulur)
+	if kind == "letter":
+		_on_choose_letter(String(choice))
+	else:
+		_on_choose_enhancement(String(choice))
+
+# Kartı YAK: yükselen ateş közleri + savrulan kül + kömürleşip büzülerek çökme.
+func _burn_card(card: Control, seqfx: Node2D) -> void:
+	if not is_instance_valid(card):
+		return
+	var c := _node_center(card)
+	var ext := card.size * 0.45
+	if Settings.particles_on:
+		# 1) ATEŞ közleri — karttan yukarı yükselir, sıcak beyaz→turuncu→koyu
+		var fire := CPUParticles2D.new()
+		seqfx.add_child(fire)
+		fire.global_position = c
+		fire.texture = _spark_tex
+		fire.material = _add_mat  # additive ateş (glow halo değil — kor partikülü)
+		fire.one_shot = true
+		fire.emitting = true
+		fire.explosiveness = 0.55
+		fire.amount = 34
+		fire.lifetime = 0.6
+		fire.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+		fire.emission_rect_extents = Vector2(ext.x, ext.y)
+		fire.direction = Vector2(0, -1)
+		fire.spread = 24.0
+		fire.gravity = Vector2(0, -150.0)  # yüksel
+		fire.initial_velocity_min = 60.0
+		fire.initial_velocity_max = 170.0
+		fire.scale_amount_min = 0.25
+		fire.scale_amount_max = 0.6
+		var fr := Gradient.new()
+		fr.set_color(0, Color(1.0, 0.95, 0.7))
+		fr.add_point(0.4, T.EMBER)
+		fr.add_point(0.8, T.MULT)
+		fr.set_color(1, Color(0.15, 0.05, 0.02, 0.0))
+		fire.color_ramp = fr
+		fire.finished.connect(fire.queue_free)
+		# 2) KÜL pulları — koyu, savrulup yavaşça yükselip kaybolur
+		var ash := CPUParticles2D.new()
+		seqfx.add_child(ash)
+		ash.global_position = c
+		ash.texture = _spark_tex
+		ash.one_shot = true
+		ash.emitting = true
+		ash.explosiveness = 0.7
+		ash.amount = 16
+		ash.lifetime = 0.95
+		ash.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+		ash.emission_rect_extents = Vector2(ext.x, ext.y)
+		ash.direction = Vector2(0, -1)
+		ash.spread = 55.0
+		ash.gravity = Vector2(0, -34.0)
+		ash.initial_velocity_min = 26.0
+		ash.initial_velocity_max = 90.0
+		ash.damping_min = 20.0
+		ash.damping_max = 60.0
+		ash.scale_amount_min = 0.14
+		ash.scale_amount_max = 0.3
+		var ar := Gradient.new()
+		ar.set_color(0, Color(0.16, 0.13, 0.12, 0.9))
+		ar.set_color(1, Color(0.10, 0.08, 0.08, 0.0))
+		ash.color_ramp = ar
+		ash.finished.connect(ash.queue_free)
+	# 3) KART: önce kömürleş (kararır) → dikeyde büzülerek çök + dönüp sön (yanan kağıt)
+	var t := create_tween()
+	t.tween_property(card, "modulate", Color(0.18, 0.10, 0.06, 1.0), 0.16)
+	t.tween_property(card, "modulate:a", 0.0, 0.42).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	var t2 := create_tween().set_parallel(true)
+	t2.tween_property(card, "scale", Vector2(0.55, 0.18), 0.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	t2.tween_property(card, "rotation", card.rotation + 0.5, 0.5)
+	t2.tween_property(card, "position:y", card.position.y - 26.0, 0.5)
+	t2.chain().tween_callback(card.queue_free)
+
 func _on_buy_booster() -> void:
 	if Shop.buy_booster(state).get("ok", false):
-		_after_shop_change()
+		money_label.text = "$%d" % state["run"]["money"]
+		_open_pack_sequence(state["run"]["boosterChoices"], "letter")
 
 func _on_choose_letter(ch: String) -> void:
 	if Shop.choose_booster_letter(state, ch).get("ok", false):
@@ -3197,7 +3674,8 @@ func _on_choose_letter(ch: String) -> void:
 
 func _on_buy_enhancer() -> void:
 	if Shop.buy_enhancer(state).get("ok", false):
-		_after_shop_change()
+		money_label.text = "$%d" % state["run"]["money"]
+		_open_pack_sequence(state["run"].get("enhancerChoices", null), "enh")
 
 func _on_choose_enhancement(eid: String) -> void:
 	# Geliştirmeyi seç → beklemeye al; sonra oyuncu hangi harfe uygulanacağını seçer (agency v2).

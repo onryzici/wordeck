@@ -5,6 +5,10 @@
 # Hata ayıklama görüntüsü (oyun --capture ile üretir)
 capture.png
 
+# Export çıktıları (DMG vb. — büyük binary, repoya girmez)
+build/
+export_templates/
+
 # Yedekler / OS
 *.bak
 *.bak*
