@@ -16,6 +16,8 @@ nasıl test edilir" diye bakabilmen.
 | 2026-06-22 | [03 — Blind seçim ekranı](2026-06-22-03-blind-secim-ekrani.md) | Springy giriş, GEÇİLDİ damgası, boss kırmızı kenarlık (glow yok) |
 | 2026-06-22 | [04 — Paket açma sekansı](2026-06-22-04-paket-acma-sekansi.md) | Booster: giriş→yırtılma→yelpaze→seçim→yanma |
 | 2026-06-22 | [05 — Özel kart efektleri](2026-06-22-05-ozel-kart-efektleri.md) | Geliştirilmiş taş shimmer + renkli kıvılcım; joker zıplama |
+| 2026-06-23 | [06 — Geçişler + menü arkaplanı](2026-06-23-06-gecisler-menu-arkaplan.md) | Kara delik/vakum geçişi, Balatro bg (charcoal+mat kırmızı), CRT z-index/BackBufferCopy, pack dissolve/tilt |
+| 2026-06-23 | [07 — Sol panel + boss + dükkan](2026-06-23-07-sol-panel-boss-dukkan.md) | Balatro hedef kutusu + blind çipi, menü logo sheen/altyazısız, dükkanda sol panel SHOP + sürükle-bırak voucher |
 
 ## Yol haritası / yapılacaklar
 - [YAPILACAKLAR.md](YAPILACAKLAR.md) — sıradaki istekler (alev shader, blind ekranı, paket açma, özel kart efektleri)

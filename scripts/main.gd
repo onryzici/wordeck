@@ -99,12 +99,13 @@ func _build_menu() -> void:
 	menu_bg.color = Color.WHITE  # shader COLOR'u yazar
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://shaders/balatro_bg.gdshader")
-	mat.set_shader_parameter("colour_1", T.MULT)            # lav kırmızı (ana)
-	mat.set_shader_parameter("colour_2", T.BRASS)           # altın (ikincil burgu)
-	mat.set_shader_parameter("colour_3", Color(0.10, 0.04, 0.03))  # derin koyu warm
+	mat.set_shader_parameter("colour_1", Color("9c3b2e"))   # MAT tuğla kırmızı (lav, daha az parlak)
+	mat.set_shader_parameter("colour_2", Color("2a2a30"))   # CHARCOAL (altın yerine)
+	mat.set_shader_parameter("colour_3", Color("0d0a0a"))   # derin koyu warm
 	mat.set_shader_parameter("spin_rotation_speed", 1.0)
 	mat.set_shader_parameter("move_speed", 4.0)            # sakin akış
-	mat.set_shader_parameter("contrast", 3.0)
+	mat.set_shader_parameter("contrast", 2.6)             # daha az kontrast = daha mat
+	mat.set_shader_parameter("lighting", 0.22)            # düşük ışık = mat görünüm
 	mat.set_shader_parameter("spin_amount", 0.26)
 	mat.set_shader_parameter("is_rotating", true)
 	menu_bg.material = mat
@@ -223,12 +224,7 @@ func _build_hero() -> void:
 		tile.rotation = deg_to_rad(off * 5.0)
 		tile.set_meta("by", by)
 		hero.add_child(tile)
-	# Alt-yazı (taşların altında)
-	var tag := _menu_label("TÜRKÇE KELİME ROGUELIKE", 26, T.EMBER)
-	tag.custom_minimum_size = Vector2(460, 0)
-	tag.position = Vector2(-230, 128)
-	tag.set_meta("by", 128.0)  # bob baz y (yoksa _process onu 0'a taşır)
-	hero.add_child(tag)
+	# (alt-yazı kaldırıldı — taşlar logonun kendisi)
 
 func _hero_tile(letter: String) -> Control:
 	var t := Panel.new()
@@ -237,6 +233,16 @@ func _hero_tile(letter: String) -> Control:
 	t.pivot_offset = t.size / 2.0
 	t.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	t.add_theme_stylebox_override("panel", T.bone_tile())
+	# Üst parlaklık (sheen) — cilalı/profesyonel his
+	var sheen := Panel.new()
+	sheen.add_theme_stylebox_override("panel", T.tile_sheen())
+	sheen.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	sheen.offset_left = 7
+	sheen.offset_right = -7
+	sheen.offset_top = 7
+	sheen.offset_bottom = 58
+	sheen.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	t.add_child(sheen)
 	var l := Label.new()
 	l.text = letter
 	l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -245,6 +251,7 @@ func _hero_tile(letter: String) -> Control:
 	l.add_theme_font_override("font", T.load_tile_font())
 	l.add_theme_font_size_override("font_size", 76)
 	l.add_theme_color_override("font_color", T.INK)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	t.add_child(l)
 	return t
 

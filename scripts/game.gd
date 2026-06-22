@@ -60,7 +60,14 @@ var _bam := 0                    # ardışık katkı (op) → yükselen perdeli 
 
 # UI refs (sol panel)
 var blind_header: Label
+var _head_panel: PanelContainer  # blind ismi kutusu (shop modunda SHOP marquee olur)
+var _head_sb_normal: StyleBox    # normal (brass) head stylebox — restore için
+var _target_box: Control         # Hedef kutusu (shop modunda gizlenir)
 var target_label: Label
+var target_reward_label: Label   # Hedef kutusu "Ödül: $$$"
+var blind_chip: Panel            # blind çipi (tür rengine göre renkli yuvarlak)
+var blind_chip_icon: Label
+var _chip_sb: StyleBoxFlat       # blind çipi stylebox (renk güncellenir)
 var round_score_label: Label
 var deck_count_label: Label
 var tier_label: Label
@@ -365,15 +372,16 @@ func _build_left_panel() -> Control:
 	outer.add_child(v)
 
 	var head := PanelContainer.new()
-	head.add_theme_stylebox_override("panel", T.button_filled(T.BRASS))
+	_head_panel = head
+	_head_sb_normal = T.button_filled(T.BRASS)
+	head.add_theme_stylebox_override("panel", _head_sb_normal)
 	blind_header = _center(_label("TUR 1", 30, T.INK, Color(1, 1, 1, 0.25), 0))
 	blind_header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(blind_header)
 	v.add_child(head)
 
-	target_label = _center(_label("EN AZ 60 PUAN", 19, T.BRASS))
-	target_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.add_child(target_label)
+	_target_box = _build_target_box()  # Balatro "Score at least / Reward" tarzı hedef kutusu
+	v.add_child(_target_box)
 	v.add_child(_build_boss_panel())  # patron kısıtlaması (sadece patron turunda görünür)
 
 	var score_panel := PanelContainer.new()
@@ -777,6 +785,76 @@ func _build_word_board() -> Control:
 	return spacer
 
 # Patron kutusu — SOL PANELDE (kullanıcı: banner değil sol menüde). Başka turlarda gizli.
+# Hedef kutusu (Balatro "Score at least / Reward" tarzı):
+# blind çipi (renkli yuvarlak) + HEDEF etiketi + büyük kırmızı hedef sayısı + Ödül $$$.
+func _build_target_box() -> Control:
+	var box := PanelContainer.new()
+	var sb := T.felt_panel(T.FELT_800, T.LINE, 14)
+	_themed_sbs.append(sb)
+	box.add_theme_stylebox_override("panel", sb)
+
+	var h := HBoxContainer.new()
+	h.add_theme_constant_override("separation", 14)
+	h.alignment = BoxContainer.ALIGNMENT_CENTER
+
+	# blind çipi — tür rengine göre renkli yuvarlak rozet
+	blind_chip = Panel.new()
+	blind_chip.custom_minimum_size = Vector2(66, 66)
+	blind_chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_chip_sb = StyleBoxFlat.new()
+	_chip_sb.bg_color = T.BRASS
+	_chip_sb.set_corner_radius_all(33)
+	_chip_sb.set_border_width_all(4)
+	_chip_sb.border_color = Color(0, 0, 0, 0.4)
+	_chip_sb.shadow_color = Color(0, 0, 0, 0.4)
+	_chip_sb.shadow_size = 5
+	_chip_sb.shadow_offset = Vector2(0, 3)
+	blind_chip.add_theme_stylebox_override("panel", _chip_sb)
+	blind_chip_icon = _label("●", 30, T.INK)
+	blind_chip_icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	blind_chip_icon.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	blind_chip_icon.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	blind_chip_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	blind_chip.add_child(blind_chip_icon)
+	h.add_child(blind_chip)
+
+	# sağ blok: HEDEF + büyük sayı + ödül (ortalı)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	var cap := _label("HEDEF", 16, T.TEXT_DIM, T.OUTLINE, 3)
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(cap)
+	target_label = _label("60", 44, T.MULT, T.OUTLINE, 5)
+	target_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(target_label)
+	target_reward_label = _label("Ödül: $", 15, T.BRASS)
+	target_reward_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(target_reward_label)
+	h.add_child(col)
+
+	box.add_child(h)
+	return box
+
+# Dükkanda sol panel tepesi: blind ismi/hedef yerine SHOP marquee (Balatro gibi).
+func _set_shop_sidebar(on: bool) -> void:
+	if _head_panel == null:
+		return
+	if on:
+		_head_panel.add_theme_stylebox_override("panel", _marquee_box())  # kırmızı marquee
+		blind_header.text = "DÜKKÂN"
+		blind_header.add_theme_color_override("font_color", Color(1.0, 0.86, 0.32))  # altın
+		if _target_box != null:
+			_target_box.visible = false
+		if boss_panel != null:
+			boss_panel.visible = false
+	else:
+		_head_panel.add_theme_stylebox_override("panel", _head_sb_normal)
+		blind_header.add_theme_color_override("font_color", T.INK)
+		if _target_box != null:
+			_target_box.visible = true
+		# blind_header.text + boss görünürlüğü _refresh_hud / _update_boss_banner'da ayarlanır
+
 func _build_boss_panel() -> Control:
 	boss_panel = PanelContainer.new()
 	var s := StyleBoxFlat.new()
@@ -2382,8 +2460,19 @@ func _refresh(deal_in: bool, sound: bool = false) -> void:
 func _refresh_hud() -> void:
 	var run: Dictionary = state["run"]
 	var round_d: Dictionary = state["round"]
+	_set_shop_sidebar(false)  # oyun modunda normal blind/hedef göster
 	blind_header.text = String(round_d["blind"]["name"]).to_upper()
-	target_label.text = "EN AZ %d PUAN" % round_d["target"]
+	target_label.text = str(round_d["target"])
+	var bt := String(round_d["blind"].get("type", "small"))
+	var rew := int(round_d["blind"].get("reward", 1))
+	target_reward_label.text = "Ödül: " + "$".repeat(clampi(rew, 1, 6))
+	# blind çipi tür rengine göre: tur1=yeşil, tur2=altın, patron=kırmızı
+	var bc: Color = T.GOOD if bt == "small" else (T.BRASS if bt == "big" else T.MULT)
+	if _chip_sb:
+		_chip_sb.bg_color = bc
+	if blind_chip_icon:
+		blind_chip_icon.text = "💀" if bt == "boss" else "●"
+		blind_chip_icon.add_theme_color_override("font_color", T.INK if bt != "boss" else Color.WHITE)
 	round_score_label.text = str(round_d["score"])
 	money_label.text = "$%d" % run["money"]
 	plays_value.text = str(round_d["playsLeft"])
@@ -2936,6 +3025,7 @@ func _open_shop() -> void:
 	if deck_holder:
 		deck_holder.visible = false  # deste dükkânda gizli (oyun alanına ait)
 	money_label.text = "$%d" % state["run"]["money"]
+	_set_shop_sidebar(true)  # sol panel tepesi → SHOP marquee
 	_rebuild_jokers()  # üst jokerler artık tıkla → SAT
 	_build_shop_ui()
 
@@ -2979,8 +3069,7 @@ func _build_shop_ui() -> void:
 		c.queue_free()
 	_shop_tags = []
 
-	# ── MARQUEE (SHOP — ampullü tiyatro tabelası) ──
-	shop_view.add_child(_center_h(_build_marquee()))
+	# (SHOP marquee artık SOL PANELDE — _set_shop_sidebar; merkezde tekrar etmez)
 	if _shop_reward:
 		var sub := "Tur geçildi!   +$%d   (taban %d · hak %d · faiz %d)" % [
 			_shop_reward["total"], _shop_reward["base"], _shop_reward["leftover"], _shop_reward["interest"]]
@@ -2989,6 +3078,10 @@ func _build_shop_ui() -> void:
 		shop_view.add_child(_center(_label(_shop_msg, 16, T.EMBER)))
 
 	var shop = state["run"]["shop"]
+
+	# ── KUPON kartı (Balatro üst "extra" satın alma spotu — ortalanmış tek kart) ──
+	if shop["voucher"] != null:
+		shop_view.add_child(_center_h(_voucher_card(shop["voucher"])))
 
 	# ── TEZGAH (tray) — felt'ten biraz açık, kalın koyu kenar, yuvarlak ──
 	var tray := PanelContainer.new()
@@ -3117,8 +3210,7 @@ func _shop_joker_slots(shop) -> Array:
 
 func _shop_pack_slots(shop) -> Array:
 	var out := []
-	if shop["voucher"] != null:
-		out.append(_voucher_slot(shop["voucher"]))
+	# (kupon artık üstteki ayrı barda — pakette değil)
 	var can_boost: bool = (not shop["booster"]["used"]) and state["run"]["money"] >= shop["booster"]["cost"]
 	out.append(_priced_slot(_pack_visual("HARF\nPAKETİ", "desteye +1 harf", T.GOOD),
 		150, 184, "$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
@@ -3215,40 +3307,68 @@ func _pack_visual(title: String, sub: String, accent: Color) -> Control:
 	return card
 
 # Kupon yuvası — içe gömük mor kuyu + (yanal) etiket + bilet kartı + fiyat etiketi.
-func _voucher_slot(v: Dictionary) -> Control:
+# KUPON kartı (Balatro üst "extra" satın alma spotu — mor bilet, SÜRÜKLE-BIRAK ile satın al).
+# Tıkla = al; sürükleyip bırak = al. Sürükleme top_level ile imleci takip eder.
+func _voucher_card(v: Dictionary) -> Control:
 	var can_v: bool = state["run"]["money"] >= v["cost"]
-	var well := PanelContainer.new()
-	var ws := StyleBoxFlat.new()
-	ws.bg_color = Color(0, 0, 0, 0.32)
-	ws.set_corner_radius_all(10)
-	ws.set_border_width_all(2)
-	ws.border_color = T.LILAC.darkened(0.2)
-	ws.content_margin_left = 6
-	ws.content_margin_right = 6
-	ws.content_margin_top = 6
-	ws.content_margin_bottom = 6
-	well.add_theme_stylebox_override("panel", ws)
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 4)
-	var side := _center(_label("KUPON", 12, T.LILAC.lerp(Color.WHITE, 0.2)))
-	side.custom_minimum_size = Vector2(22, 0)
-	hb.add_child(side)
-	# Bilet kartı (mor)
-	var ticket := PanelContainer.new()
-	ticket.add_theme_stylebox_override("panel", _item_sb(T.LILAC.lightened(0.2), T.LILAC.darkened(0.05)))
-	ticket.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var tv := VBoxContainer.new()
-	tv.alignment = BoxContainer.ALIGNMENT_CENTER
-	tv.add_theme_constant_override("separation", 6)
-	tv.add_child(_center(_label("◈", 38, Color(1, 0.97, 0.88))))
-	var vn := _center(_label(String(v["name"]).to_upper(), 14, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 4))
-	vn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vn.custom_minimum_size = Vector2(108, 0)
-	tv.add_child(vn)
-	ticket.add_child(tv)
-	hb.add_child(ticket)
-	well.add_child(hb)
-	return _priced_slot(well, 168, 184, "$%d" % v["cost"], can_v, _on_buy_voucher, v["description"])
+	var root := Control.new()
+	root.custom_minimum_size = Vector2(172, 188 + 16)
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.tooltip_text = v["description"]
+
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", _item_sb(T.LILAC.lightened(0.15), T.LILAC.darkened(0.42)))
+	card.set_anchors_preset(Control.PRESET_FULL_RECT)
+	card.offset_top = 16
+	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if not can_v:
+		card.modulate = Color(1, 1, 1, 0.5)
+	var vb := VBoxContainer.new()
+	vb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 5)
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(_center(_label("KUPON", 12, T.LILAC.lerp(Color.WHITE, 0.4))))
+	vb.add_child(_center(_label("◈", 42, Color(1, 0.97, 0.88))))
+	var nm := _center(_label(String(v["name"]).to_upper(), 15, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 4))
+	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	nm.custom_minimum_size = Vector2(132, 0)
+	vb.add_child(nm)
+	card.add_child(vb)
+	root.add_child(card)
+
+	var tag := _price_tag("$%d" % v["cost"], can_v)
+	root.add_child(tag)
+	_shop_tags.append({"tag": tag, "slot": root})
+
+	if can_v:
+		root.gui_input.connect(_voucher_input.bind(root))
+	return root
+
+var _vdrag := {}
+func _voucher_input(event: InputEvent, root: Control) -> void:
+	if not is_instance_valid(root):
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_vdrag = {"down": true, "active": false, "m0": root.get_global_mouse_position(), "p0": root.global_position}
+		else:
+			var was_active: bool = _vdrag.get("active", false)
+			var was_down: bool = _vdrag.get("down", false)
+			_vdrag = {}
+			if was_active or was_down:
+				if was_active:
+					root.top_level = false
+				_play_card_move()
+				_on_buy_voucher()  # tıkla VEYA sürükle-bırak → satın al (shop UI yeniden kurulur)
+	elif event is InputEventMouseMotion and _vdrag.get("down", false):
+		var d: Vector2 = root.get_global_mouse_position() - _vdrag["m0"]
+		if not _vdrag.get("active", false) and d.length() > 8.0:
+			_vdrag["active"] = true
+			root.top_level = true
+			root.z_index = 80
+		if _vdrag.get("active", false):
+			root.global_position = _vdrag["p0"] + d
 
 # Item kart stylebox — parlak sticker hissi (kalın koyu kenar, alt gölge).
 func _item_sb(border: Color, bg: Color) -> StyleBoxFlat:
