@@ -21,7 +21,8 @@ var menu_bg: ColorRect
 var help_overlay: Control
 var music: AudioStreamPlayer        # menü müziği
 var game_music: AudioStreamPlayer   # oyun-içi 8-bit müzik
-var fade: ColorRect            # siyah geçiş katmanı (menü → oyun)
+var fade: ColorRect            # girdap geçiş katmanı (menü ↔ oyun)
+var _fade_mat: ShaderMaterial  # vortex_transition shader materyali
 var hero: Control              # merkez yelpaze taşları (hafif sallanır)
 
 var settings_overlay: Control
@@ -31,8 +32,14 @@ func _ready() -> void:
 	Settings.init()  # ses bus'ları + kalıcı ayarları yükle/uygula
 	get_viewport().size_changed.connect(_update_aspect)
 	_build_menu()
-	_add_crt()
-	_build_fade()
+	_build_fade()   # girdap geçişi ÖNCE eklenir → CRT'nin ALTINDA kalır
+	# BackBufferCopy: CRT'nin, girdabın ÇIKTISINI örneklemesini garantiler (iki screen-texture
+	# shader üst üste → üstteki alttakini görsün diye aralarına taze backbuffer kopyası şart).
+	var bb := BackBufferCopy.new()
+	bb.copy_mode = BackBufferCopy.COPY_MODE_VIEWPORT
+	bb.z_index = 1000  # CRT'nin (1001) hemen altında → tüm yüksek-z içeriği taze kopyalar
+	add_child(bb)
+	_add_crt()      # CRT EN ÜSTTE: girdap dahil her şeyi post-process eder (geçişte kaybolmaz)
 	_update_aspect()
 	game.visible = false
 	menu_root.visible = true
@@ -84,20 +91,22 @@ func _build_menu() -> void:
 	menu_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(menu_root)
 
-	# Turuncu-kırmızı AKIŞKAN arka plan (felt_swirl shader, sıcak palet — daha GİRDAP).
+	# Balatro tarzı akışkan boya arka plan (balatro_bg shader) — KENDİ sıcak paletimizle:
+	# lav-kırmızı ↔ altın, derin koyu keçe. (Balatro'nun kırmızı/mavisi değil, bizim tarzımız.)
 	menu_bg = ColorRect.new()
 	menu_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	menu_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	menu_bg.color = Color.WHITE  # shader COLOR'u yazar
 	var mat := ShaderMaterial.new()
-	mat.shader = load("res://shaders/felt_swirl.gdshader")
-	mat.set_shader_parameter("color_deep", Color(0.16, 0.02, 0.02))   # koyu bordo
-	mat.set_shader_parameter("color_felt", Color(0.66, 0.13, 0.06))   # kırmızı
-	mat.set_shader_parameter("color_high", Color(0.99, 0.56, 0.15))   # turuncu vurgu
-	mat.set_shader_parameter("speed", 0.085)     # YAVAŞ (kullanıcı: menü girdabı çok hızlıydı)
-	mat.set_shader_parameter("swirl", 3.6)
-	mat.set_shader_parameter("warp_scale", 2.4)
-	mat.set_shader_parameter("whirl", 0.7)       # daha az dönme = sakin girdap
-	mat.set_shader_parameter("contrast", 1.28)
+	mat.shader = load("res://shaders/balatro_bg.gdshader")
+	mat.set_shader_parameter("colour_1", T.MULT)            # lav kırmızı (ana)
+	mat.set_shader_parameter("colour_2", T.BRASS)           # altın (ikincil burgu)
+	mat.set_shader_parameter("colour_3", Color(0.10, 0.04, 0.03))  # derin koyu warm
+	mat.set_shader_parameter("spin_rotation_speed", 1.0)
+	mat.set_shader_parameter("move_speed", 4.0)            # sakin akış
+	mat.set_shader_parameter("contrast", 3.0)
+	mat.set_shader_parameter("spin_amount", 0.26)
+	mat.set_shader_parameter("is_rotating", true)
 	menu_bg.material = mat
 	menu_root.add_child(menu_bg)
 
@@ -253,37 +262,54 @@ func _process(_delta: float) -> void:
 func _build_fade() -> void:
 	fade = ColorRect.new()
 	fade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	fade.color = Color(0.02, 0.01, 0.0)  # neredeyse siyah (sıcak ton)
+	fade.color = Color(0.02, 0.01, 0.0)
 	fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	fade.modulate.a = 0.0
-	add_child(fade)  # en üstte (CRT'den sonra)
+	# Girdap/karadelik geçişi: ekran burgulanıp merkeze çekilerek siyaha çöker
+	_fade_mat = ShaderMaterial.new()
+	_fade_mat.shader = load("res://shaders/vortex_transition.gdshader")
+	_fade_mat.set_shader_parameter("progress", 0.0)
+	fade.material = _fade_mat
+	fade.visible = false  # boştayken kapalı (her kare ekran örneklemesin)
+	add_child(fade)  # CRT'den ÖNCE → CRT girdabın üstünde kalır (geçişte CRT kaybolmaz)
+
+func _set_fade_progress(v: float) -> void:
+	if _fade_mat != null:
+		_fade_mat.set_shader_parameter("progress", v)
 
 # ── Akış: menü → oyun ──
 func _on_play_pressed() -> void:
-	# 1) Siyaha geç (+ müziği kıs) → 2) sahneyi değiştir → 3) siyahtan oyuna aç.
+	# 1) Girdaba çekil (+ müziği kıs) → 2) sahneyi değiştir → 3) girdaptan oyuna çık.
+	# Kara deliğe çekiliş (içerik merkeze akar → siyah)
+	fade.material = _fade_mat
+	_set_fade_progress(0.0)
+	fade.modulate.a = 1.0
+	fade.visible = true
 	var tw := create_tween()
-	tw.tween_property(fade, "modulate:a", 1.0, 0.38).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.tween_method(_set_fade_progress, 0.0, 1.0, 1.05).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
 	if music and music.playing:
-		tw.parallel().tween_property(music, "volume_db", -40.0, 0.38)
+		tw.parallel().tween_property(music, "volume_db", -40.0, 1.05)
 	await tw.finished
 	if music:
 		music.stop()
 	_play_game_music()  # oyuna girince 8-bit müzik başlar
 	_reveal_game()
 	game.enter_session()
-	# kısa bekleme: kartlar desteden gelmeye başlasın, sonra siyahı aç
+	# kısa bekleme: kartlar desteden gelmeye başlasın, sonra YUMUŞAK fade-in ile aç
 	await get_tree().create_timer(0.12).timeout
-	var tw2 := create_tween()
-	tw2.tween_property(fade, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_reveal_from_black(0.9)
 
 func _reveal_game() -> void:
 	menu_root.visible = false
 	game.visible = true
 
-# Oyundan (kazan/kaybet ekranı) ana menüye dönüş — siyah geçiş + müzik.
+# Oyundan (kazan/kaybet ekranı) ana menüye dönüş — girdap geçiş + müzik.
 func _on_request_menu() -> void:
+	fade.material = _fade_mat
+	_set_fade_progress(0.0)
+	fade.modulate.a = 1.0
+	fade.visible = true
 	var tw := create_tween()
-	tw.tween_property(fade, "modulate:a", 1.0, 0.32).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.tween_method(_set_fade_progress, 0.0, 1.0, 0.95).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
 	await tw.finished
 	game.visible = false
 	menu_root.visible = true
@@ -294,8 +320,17 @@ func _on_request_menu() -> void:
 		music.play()
 	else:
 		_play_music()
-	var tw2 := create_tween()
-	tw2.tween_property(fade, "modulate:a", 0.0, 0.45).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_reveal_from_black(0.85)
+
+# TERS kara delik: yeni ekran girdaptan açılarak gelir (progress 1→0). Düz siyah yok.
+func _reveal_from_black(dur: float) -> void:
+	await get_tree().process_frame  # yeni ekran bir kare otursun (warp'ı temiz örneklesin)
+	var tw := create_tween()
+	tw.tween_method(_set_fade_progress, 1.0, 0.0, dur).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	await tw.finished
+	fade.visible = false
+	_set_fade_progress(0.0)
+	fade.modulate.a = 1.0
 
 func _on_quit_pressed() -> void:
 	get_tree().quit()
@@ -486,6 +521,9 @@ func _add_crt() -> void:
 	var crt := ColorRect.new()
 	crt.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	crt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# EN ÜST z_index: dükkan perdesi (z=95), overlay (z=100) gibi yüksek-z öğeler bile
+	# CRT'yi örtmesin (z_index ağaç sırasını ezer → CRT hepsinin üstünde kalmalı).
+	crt.z_index = 1001
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://shaders/crt.gdshader")
 	crt.material = mat

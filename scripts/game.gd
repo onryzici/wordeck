@@ -41,6 +41,11 @@ var _pulse_tween: Tween = null
 var _spark_tex: Texture2D
 var _tile_font: FontFile
 var _add_mat: CanvasItemMaterial
+# Paket açma sekansı varlıkları (lazy — ilk paket açılışında kurulur)
+var _atmo_shader: Shader = null
+var _dissolve_shader: Shader = null
+var _tilt_shader: Shader = null
+var _dissolve_noise: NoiseTexture2D = null
 var deck_holder: Control
 var _sfx: AudioStreamPlayer
 var _shuffle: AudioStream
@@ -2520,6 +2525,7 @@ func _ensure_overlay() -> void:
 		return
 	overlay = Control.new()
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.z_index = 100  # dükkân fiyat etiketleri (z_index=5) gibi öğelerin ÜSTÜNDE kalsın
 	add_child(overlay)  # fx_layer'dan SONRA → her şeyin üstünde
 	_overlay_dim = ColorRect.new()
 	_overlay_dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -2671,7 +2677,36 @@ func _coin_juice() -> void:
 
 func _on_cash_out_continue() -> void:
 	_close_overlay()
-	_open_shop()
+	_go_to_shop()
+
+# Dükkana gidiş geçişi: ekran girdaba çekilip siyaha çöker → dükkan kurulur → çıkılır.
+func _go_to_shop() -> void:
+	if _busy:
+		_open_shop()
+		return
+	_busy = true
+	var cover := ColorRect.new()
+	cover.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cover.mouse_filter = Control.MOUSE_FILTER_STOP
+	cover.z_index = 95  # board içeriğinin üstünde, overlay'in (100) altında
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/vortex_transition.gdshader")
+	mat.set_shader_parameter("progress", 0.0)
+	cover.material = mat
+	add_child(cover)
+	_play_card_move()  # whoosh
+	# Kara deliğe çekiliş: içerik merkeze akar → siyah
+	var tin := create_tween()
+	tin.tween_method(func(v): mat.set_shader_parameter("progress", v), 0.0, 1.0, 1.0).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
+	await tin.finished
+	_open_shop()                       # siyahken görünümü değiştir
+	_add_trauma(0.12)                  # hafif "yerleşme" vurgusu
+	await get_tree().process_frame     # dükkan layout otursun
+	# TERS kara delik: dükkan girdaptan açılarak gelir (progress 1→0)
+	var tout := create_tween()
+	tout.tween_method(func(v): mat.set_shader_parameter("progress", v), 1.0, 0.0, 0.85).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tout.tween_callback(cover.queue_free)
+	tout.tween_callback(func(): _busy = false)
 
 # ── BLIND SEÇİM EKRANI (Balatro "Choose your next Blind") — TAHTA-İÇİ uzun kolonlar ──
 func _open_blind_select() -> void:
@@ -3389,8 +3424,9 @@ func _open_pack_sequence(choices, kind: String) -> void:
 	if choices == null or (choices is Array and choices.is_empty()):
 		_after_shop_change()
 		return
+	_ensure_pack_assets()
 	var center := size * 0.5
-	# Overlay katmanları: dim (alt) → hold (kartlar) → seqfx (partikül, üst)
+	# Overlay katmanları: dim (alt) → atmo (CRT/vinyet/rim) → hold (kartlar) → seqfx (partikül, üst)
 	var ov := Control.new()
 	ov.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ov.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -3400,6 +3436,18 @@ func _open_pack_sequence(choices, kind: String) -> void:
 	dim.color = Color(0, 0, 0, 0)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	ov.add_child(dim)
+	# Atmosfer: zarif koyu vinyet + ince CRT tarama çizgileri (renkli parıltı yok)
+	if Settings.particles_on:
+		var atmo := ColorRect.new()
+		atmo.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		atmo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var amat := ShaderMaterial.new()
+		amat.shader = _atmo_shader
+		amat.set_shader_parameter("intensity", 0.0)
+		atmo.material = amat
+		ov.add_child(atmo)
+		create_tween().tween_method(
+			func(v): amat.set_shader_parameter("intensity", v), 0.0, 1.0, 0.35)
 	var hold := Control.new()
 	hold.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ov.add_child(hold)
@@ -3448,18 +3496,35 @@ func _open_pack_sequence(choices, kind: String) -> void:
 	await tr.finished
 	if is_instance_valid(pack):
 		pack.queue_free()
-	# 4) YELPAZE — kartlar paket merkezinden yaylanarak yaya açılır (stagger)
+	# 4) YELPAZE — kartlar paket merkezinden yaylanarak yaya açılır (stagger).
+	#    Her kart = stillenmiş panel'in snapshot'ı → fake-3D eğim materyalli TextureRect
+	#    (Balatro tarzı: imlece doğru 3B eğilir).
 	var n: int = choices.size()
 	var spacing := 174.0
 	var cards: Array = []
 	for i in n:
-		var card := _pack_overlay_card(kind, choices[i])
+		var src := _pack_overlay_card(kind, choices[i])  # stillenmiş panel (ağaca eklenmez)
+		var csize: Vector2 = src.size
+		var tex := await _render_to_texture(src, csize)
+		var card := TextureRect.new()
+		card.texture = tex
+		card.size = csize
+		card.stretch_mode = TextureRect.STRETCH_SCALE
+		card.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if _tilt_shader != null and tex != null:
+			var tmat := ShaderMaterial.new()
+			tmat.shader = _tilt_shader
+			tmat.set_shader_parameter("rect_size", csize)
+			tmat.set_shader_parameter("x_rot", 0.0)
+			tmat.set_shader_parameter("y_rot", 0.0)
+			card.material = tmat
 		hold.add_child(card)
-		card.pivot_offset = card.size * 0.5
+		card.pivot_offset = csize * 0.5
 		var off := i - (n - 1) / 2.0
-		var tpos := Vector2(center.x + off * spacing, center.y + off * off * 10.0) - card.size * 0.5
+		var tpos := Vector2(center.x + off * spacing, center.y + off * off * 10.0) - csize * 0.5
 		var trot := off * 0.12
-		card.position = center - card.size * 0.5
+		card.position = center - csize * 0.5
 		card.scale = Vector2(0.3, 0.3)
 		var d := i * 0.06
 		var ct := create_tween().set_parallel(true)
@@ -3474,6 +3539,7 @@ func _open_pack_sequence(choices, kind: String) -> void:
 		card.add_child(hit)
 		hit.mouse_entered.connect(_pack_card_hover.bind(card, trot, true))
 		hit.mouse_exited.connect(_pack_card_hover.bind(card, trot, false))
+		hit.gui_input.connect(_pack_card_tilt.bind(card))
 		hit.pressed.connect(_resolve_pack_pick.bind(ov, seqfx, cards, card, choices[i], kind))
 	# "X'TEN 1 SEÇ" başlığı yukarıda belirir
 	var sel := _label("%d'TEN 1 SEÇ" % n, 32, T.BRASS, T.OUTLINE, 6)
@@ -3552,13 +3618,35 @@ func _pack_overlay_card(kind: String, choice) -> Control:
 		card.add_child(vb)
 	return card
 
-# Yelpaze kartı hover: büyü + düzleş (glow YOK).
+# Yelpaze kartı hover: büyü + 2B yelpaze açısını düzleş (glow YOK).
+# Çıkışta 3B eğim de yaylanarak sıfıra döner (Balatro hissi).
 func _pack_card_hover(card: Control, base_rot: float, on: bool) -> void:
 	if not is_instance_valid(card):
 		return
 	var t := create_tween().set_parallel(true)
-	t.tween_property(card, "scale", Vector2(1.1, 1.1) if on else Vector2.ONE, 0.1).set_trans(Tween.TRANS_BACK)
-	t.tween_property(card, "rotation", 0.0 if on else base_rot, 0.1)
+	t.tween_property(card, "scale", Vector2(1.12, 1.12) if on else Vector2.ONE, 0.12).set_trans(Tween.TRANS_BACK)
+	t.tween_property(card, "rotation", 0.0 if on else base_rot, 0.12)
+	if not on:
+		var mat := card.material as ShaderMaterial
+		if mat != null:
+			var cx: float = mat.get_shader_parameter("x_rot")
+			var cy: float = mat.get_shader_parameter("y_rot")
+			t.tween_method(func(v): mat.set_shader_parameter("x_rot", v), cx, 0.0, 0.3).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			t.tween_method(func(v): mat.set_shader_parameter("y_rot", v), cy, 0.0, 0.3).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# Yelpaze kartı: imleç konumuna göre fake-3D eğim (Balatro kartı gibi imlece eğilir).
+func _pack_card_tilt(event: InputEvent, card: Control) -> void:
+	if not is_instance_valid(card) or not (event is InputEventMouseMotion):
+		return
+	var mat := card.material as ShaderMaterial
+	if mat == null:
+		return
+	var sz: Vector2 = card.size
+	var lx := clampf(event.position.x / maxf(sz.x, 1.0), 0.0, 1.0)
+	var ly := clampf(event.position.y / maxf(sz.y, 1.0), 0.0, 1.0)
+	var max_deg := 16.0
+	mat.set_shader_parameter("y_rot", (lx * 2.0 - 1.0) * max_deg)   # yatay → y ekseni
+	mat.set_shader_parameter("x_rot", -(ly * 2.0 - 1.0) * max_deg)  # dikey → x ekseni
 
 # Seçim: chosen pop+uç, kalanlar YAN, overlay kapanır, sonra ilgili handler.
 func _resolve_pack_pick(ov: Control, seqfx: Node2D, cards: Array, chosen: Control, choice, kind: String) -> void:
@@ -3578,7 +3666,7 @@ func _resolve_pack_pick(ov: Control, seqfx: Node2D, cards: Array, chosen: Contro
 			pt.parallel().tween_property(c, "modulate:a", 0.0, 0.3).set_delay(0.12)
 		else:
 			_burn_card(c, seqfx)
-	await get_tree().create_timer(0.55).timeout
+	await get_tree().create_timer(0.85).timeout
 	if is_instance_valid(ov):
 		var ot := create_tween()
 		ot.tween_property(ov, "modulate:a", 0.0, 0.25)
@@ -3591,7 +3679,7 @@ func _resolve_pack_pick(ov: Control, seqfx: Node2D, cards: Array, chosen: Contro
 	else:
 		_on_choose_enhancement(String(choice))
 
-# Kartı YAK: yükselen ateş közleri + savrulan kül + kömürleşip büzülerek çökme.
+# Kartı YAK: yükselen ateş közleri + savrulan kül + GERÇEK edge-dissolve (kenardan kül olma).
 func _burn_card(card: Control, seqfx: Node2D) -> void:
 	if not is_instance_valid(card):
 		return
@@ -3651,15 +3739,67 @@ func _burn_card(card: Control, seqfx: Node2D) -> void:
 		ar.set_color(1, Color(0.10, 0.08, 0.08, 0.0))
 		ash.color_ramp = ar
 		ash.finished.connect(ash.queue_free)
-	# 3) KART: önce kömürleş (kararır) → dikeyde büzülerek çök + dönüp sön (yanan kağıt)
-	var t := create_tween()
-	t.tween_property(card, "modulate", Color(0.18, 0.10, 0.06, 1.0), 0.16)
-	t.tween_property(card, "modulate:a", 0.0, 0.42).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
-	var t2 := create_tween().set_parallel(true)
-	t2.tween_property(card, "scale", Vector2(0.55, 0.18), 0.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
-	t2.tween_property(card, "rotation", card.rotation + 0.5, 0.5)
-	t2.tween_property(card, "position:y", card.position.y - 26.0, 0.5)
-	t2.chain().tween_callback(card.queue_free)
+	# 3) KART: burn-edge dissolve. Kart zaten dokulu TextureRect → eğim materyalini
+	#    dissolve shader'ıyla değiştir, dissolve_value 1→0 ile kenardan içe doğru kül et.
+	var tcard := card as TextureRect
+	if _dissolve_shader == null or tcard == null or tcard.texture == null:
+		# Fallback: kararıp büzülerek sön
+		var tf := create_tween()
+		tf.tween_property(card, "modulate", Color(0.18, 0.10, 0.06, 1.0), 0.16)
+		tf.tween_property(card, "modulate:a", 0.0, 0.42).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+		tf.parallel().tween_property(card, "scale", Vector2(0.55, 0.18), 0.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+		tf.chain().tween_callback(card.queue_free)
+		return
+	for ch in tcard.get_children():
+		if ch is Button:  # tıklama alanını kapat
+			ch.queue_free()
+	var mat := ShaderMaterial.new()
+	mat.shader = _dissolve_shader
+	mat.set_shader_parameter("dissolve_texture", _dissolve_noise)
+	mat.set_shader_parameter("dissolve_value", 1.0)
+	tcard.material = mat
+	var dt := create_tween()
+	dt.tween_method(func(v): mat.set_shader_parameter("dissolve_value", v), 1.0, 0.0, 0.7).set_ease(Tween.EASE_IN)
+	dt.tween_callback(tcard.queue_free)
+
+# Paket sekansı varlıklarını (shader + gürültü) ilk açılışta kur.
+func _ensure_pack_assets() -> void:
+	if _atmo_shader == null:
+		_atmo_shader = load("res://shaders/pack_atmosphere.gdshader")
+	if _dissolve_shader == null:
+		_dissolve_shader = load("res://shaders/card_dissolve.gdshader")
+	if _tilt_shader == null:
+		_tilt_shader = load("res://shaders/card_tilt_3d.gdshader")
+	if _dissolve_noise == null:
+		var n := FastNoiseLite.new()
+		n.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+		n.frequency = 0.06  # daha ince kül (iri blob değil)
+		var nt := NoiseTexture2D.new()
+		nt.width = 256
+		nt.height = 256
+		nt.seamless = true
+		nt.noise = n
+		_dissolve_noise = nt
+
+# Bir Control'ü offscreen SubViewport'ta tek kare render edip ImageTexture döndür.
+# (Stretch modundan bağımsız; UV 0..1 temiz olsun diye dissolve buradan beslenir.)
+func _render_to_texture(node: Control, sizepx: Vector2) -> ImageTexture:
+	var w := int(ceil(maxf(sizepx.x, 1.0)))
+	var h := int(ceil(maxf(sizepx.y, 1.0)))
+	var vp := SubViewport.new()
+	vp.size = Vector2i(w, h)
+	vp.transparent_bg = true
+	vp.disable_3d = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	add_child(vp)
+	vp.add_child(node)
+	await RenderingServer.frame_post_draw
+	var tex: ImageTexture = null
+	var img := vp.get_texture().get_image()
+	if img != null:
+		tex = ImageTexture.create_from_image(img)
+	vp.queue_free()
+	return tex
 
 func _on_buy_booster() -> void:
 	if Shop.buy_booster(state).get("ok", false):
