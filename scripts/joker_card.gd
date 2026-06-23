@@ -7,6 +7,8 @@ var jid: String = ""
 var reorder_cb: Callable      # game.gd._on_joker_reorder(from_jid, target_jid, after)
 var preview_cb: Callable      # game.gd._joker_drag_preview(jid) -> Control
 var draggable := false        # yalnız OYUN modunda + 2+ joker varken sürüklenir
+# Hover bilgi kartı game.gd'de mouse_entered/exited sinyalleriyle yönetilir (özel popover,
+# Godot native tooltip'in arka panel "dikdörtgeni" olmadan).
 
 func _get_drag_data(_pos: Vector2):
 	if not draggable:

@@ -4,8 +4,8 @@ shader_type canvas_item;
 
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
 uniform float curvature : hint_range(0.0, 0.2) = 0.05;
-uniform float aberration : hint_range(0.0, 4.0) = 1.4;
-uniform float scan_strength : hint_range(0.0, 0.4) = 0.22;
+uniform float aberration : hint_range(0.0, 4.0) = 0.9;
+uniform float scan_strength : hint_range(0.0, 0.4) = 0.10;
 uniform float scan_lines = 220.0;  // ekran yüksekliği boyunca SABİT çizgi sayısı (çözünürlükten bağımsız → 4K'da da görünür)
 uniform float vignette_amt : hint_range(0.0, 0.6) = 0.22;
 

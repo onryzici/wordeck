@@ -14,7 +14,9 @@ static func _word_of(cards: Array) -> String:
 	return w
 
 # preview=true: canlı önizleme — rastgele/yan-etkili jokerler pas geçer.
-static func score_word(state: Dictionary, cards: Array, preview: bool = false) -> Dictionary:
+# base_only=true: JOKER kancaları HİÇ çalışmaz (yalnız harf çipleri + harf geliştirmeleri + kademe).
+#   Canlı önizleme bunu kullanır → joker katkıları OYNA'da animasyonla gelir (Balatro hissi).
+static func score_word(state: Dictionary, cards: Array, preview: bool = false, base_only: bool = false) -> Dictionary:
 	var tier: Dictionary = WordTiers.tier_for(cards.size())
 	var ctx = Ctx.new()
 	ctx.chips = 0
@@ -34,7 +36,8 @@ static func score_word(state: Dictionary, cards: Array, preview: bool = false) -
 		var op_start: int = ctx._ops.size()
 		ctx.card = card
 		Enhancements.apply_letter(ctx, card)  # foil/holo/poly/golden/glass (harf-üstü)
-		Hooks.run_hooks(state, "onLetterScored", ctx)
+		if not base_only:
+			Hooks.run_hooks(state, "onLetterScored", ctx)
 		ctx.card = null
 		timeline.append({
 			"kind": "letter", "char": card["char"], "base": base,
@@ -48,8 +51,9 @@ static func score_word(state: Dictionary, cards: Array, preview: bool = false) -
 		"ops": [], "chips": ctx.chips, "mult": ctx.mult,
 	})
 
-	# 4) tüm kelime için onWordScored (jokerler soldan sağa)
-	Hooks.run_hooks(state, "onWordScored", ctx)
+	# 4) tüm kelime için onWordScored (jokerler soldan sağa) — base_only'de atlanır
+	if not base_only:
+		Hooks.run_hooks(state, "onWordScored", ctx)
 
 	# 5) score = chips × mult
 	var score: int = int(round(ctx.chips * ctx.mult))

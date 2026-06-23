@@ -46,33 +46,41 @@ func _ready() -> void:
 	game.request_menu.connect(_on_request_menu)  # kazan/kaybet → ana menü
 
 	var args := OS.get_cmdline_user_args()
-	if args.has("--capture"):
-		if not args.has("--menu"):
-			# Oyun ekranını yakala (eski demo/play akışı korunur).
-			_reveal_game()
-			if args.has("--demo") or args.has("--play"):
-				game.demo_select_valid()
-			if args.has("--play"):
-				await get_tree().create_timer(0.3).timeout
-				game.demo_play()
-			if args.has("--shop"):
-				game.demo_open_shop()
-			if args.has("--lose"):
-				game.demo_open_lose()
-			if args.has("--enh"):
-				game.demo_enhance()
-			if args.has("--boss"):
-				game.demo_boss()
-			if args.has("--jokers"):
-				game.demo_jokers()
-			if args.has("--enhpick"):
-				game.demo_enh_picker()
-			if args.has("--cashout"):
-				game.demo_cash_out()
-			if args.has("--refill"):
-				game.demo_play_refill()
-			if args.has("--blind"):
-				game.demo_blind_select()
+	var capturing := args.has("--capture")
+	# Demo bayraklarından biri var mı? (capture'sız CANLI gösterim için de kullanılır)
+	var has_demo := false
+	for f in ["--demo", "--play", "--shop", "--lose", "--enh", "--boss", "--jokers", "--enhpick", "--cashout", "--refill", "--blind"]:
+		if args.has(f):
+			has_demo = true
+
+	# Demo akışı: capture modunda VEYA capture'sız canlı (--menu hariç) çalışır → oyun açılır, kapanmaz.
+	if (capturing and not args.has("--menu")) or (has_demo and not capturing):
+		_reveal_game()
+		if args.has("--demo") or args.has("--play"):
+			game.demo_select_valid()
+		if args.has("--play"):
+			await get_tree().create_timer(0.3).timeout
+			game.demo_play()
+		if args.has("--shop"):
+			game.demo_open_shop()
+		if args.has("--lose"):
+			game.demo_open_lose()
+		if args.has("--enh"):
+			game.demo_enhance()
+		if args.has("--boss"):
+			game.demo_boss()
+		if args.has("--jokers"):
+			game.demo_jokers()
+		if args.has("--enhpick"):
+			game.demo_enh_picker()
+		if args.has("--cashout"):
+			game.demo_cash_out()
+		if args.has("--refill"):
+			game.demo_play_refill()
+		if args.has("--blind"):
+			game.demo_blind_select()
+
+	if capturing:
 		if args.has("--settings"):
 			_on_settings_pressed()
 		var wait := 4.0 if args.has("--late") else 1.4
@@ -81,6 +89,9 @@ func _ready() -> void:
 		print("capture_result=", img.save_png("res://capture.png"))
 		get_tree().quit()
 		return
+
+	if has_demo:
+		return  # canlı demo açıldı (menüye düşme / menü müziği başlatma)
 
 	# Normal akış: menü görünür + müzik çalar.
 	_play_music()
@@ -213,7 +224,9 @@ func _build_hero() -> void:
 	hero.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu_root.add_child(hero)
 
-	var tex: Texture2D = load("res://assets/images/glyphix.png")
+	var tex: Texture2D = game._load_png("res://assets/images/glyphix.png")
+	if tex == null:
+		return   # logo yüklenemediyse menü logosuz açılır (çökme yok)
 	var lw := 680.0   # daha büyük başlık
 	var lh := lw * 1277.0 / 3001.0   # logonun gerçek oranı (UV temiz eşlensin → warp düzgün)
 	var pos := Vector2(-lw * 0.5, -lh * 0.5)  # merkeze

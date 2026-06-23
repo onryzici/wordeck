@@ -42,7 +42,7 @@ void fragment() {
 	c += (g - 0.5) * 0.075;                    // daha belirgin film grain
 	// CRT tarama çizgileri — global CRT'yle AYNI (SCREEN_UV × 220) → hizalı + logoda daha yoğun
 	float scan = 0.5 + 0.5 * sin(SCREEN_UV.y * 220.0 * 6.28318);
-	c *= 1.0 - 0.18 * (1.0 - scan);
+	c *= 1.0 - 0.09 * (1.0 - scan);
 	col.rgb = clamp(c, 0.0, 1.0);
 
 	COLOR = col;
