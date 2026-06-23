@@ -1380,6 +1380,9 @@ func _make_tile(card: Dictionary) -> Control:
 
 # Sürekli hafif 3D float — kartlar "yaşıyor" hissi (Balatro tarzı).
 func _process(_delta: float) -> void:
+	# Oyun gizliyken (ana menüde) per-frame işin TAMAMINI atla — görünmeyen UI'a alev/bob/float boşa.
+	if not visible:
+		return
 	# Trauma-tabanlı ekran sarsıntısı — erken return'lerden ÖNCE uygulanır (her zaman çalışsın).
 	if shaker != null:
 		if _trauma > 0.0:
@@ -1399,9 +1402,8 @@ func _process(_delta: float) -> void:
 	# Joker kartları sürekli hafif SÜZÜLÜR (yaşıyor hissi) — düz sağa-sola "silecek" DEĞİL:
 	# yumuşak dikey float + çok az eğilme (farklı frekans + her kart farklı faz → organik).
 	if joker_box:
-		var jcards := joker_box.get_children()
-		for i in jcards.size():
-			var jc: Control = jcards[i]
+		for i in joker_box.get_child_count():  # get_children() dizi-ayırması yok (kare başına alloc azalt)
+			var jc: Control = joker_box.get_child(i)
 			if not jc.has_meta("jid"):
 				continue  # boş yuva süzülmez
 			if jc.size != Vector2.ZERO:
@@ -1426,9 +1428,8 @@ func _process(_delta: float) -> void:
 		lb.position.y = float(lb.get_meta("bob_base")) + sin(t * 1.6 + i * 0.7) * 2.5  # ±2.5px
 	if hand_area == null:
 		return
-	var tiles := hand_area.get_children()
-	for i in tiles.size():
-		var tile: Control = tiles[i]
+	for i in hand_area.get_child_count():  # get_children() dizi-ayırması yok
+		var tile: Control = hand_area.get_child(i)
 		var vis = tile.get_meta("visual", null)
 		if vis == null:
 			continue

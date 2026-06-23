@@ -42,6 +42,7 @@ func _ready() -> void:
 	_add_crt()      # CRT EN ÜSTTE: girdap dahil her şeyi post-process eder (geçişte kaybolmaz)
 	_update_aspect()
 	game.visible = false
+	background.visible = false  # başlangıçta menü açık → oyun girdabı render olmasın
 	menu_root.visible = true
 	game.request_menu.connect(_on_request_menu)  # kazan/kaybet → ana menü
 
@@ -314,6 +315,7 @@ func _on_play_pressed() -> void:
 func _reveal_game() -> void:
 	menu_root.visible = false
 	game.visible = true
+	background.visible = true  # oyun girdabı yalnız oyunda render olsun (menüde menü bg örtüyordu → boşa)
 
 # Oyundan (kazan/kaybet ekranı) ana menüye dönüş — girdap geçiş + müzik.
 func _on_request_menu() -> void:
@@ -325,6 +327,7 @@ func _on_request_menu() -> void:
 	tw.tween_method(_set_fade_progress, 0.0, 1.0, 0.95).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
 	await tw.finished
 	game.visible = false
+	background.visible = false  # menüde oyun girdabı render olmasın (menü bg örtüyor → görünmez kazanç)
 	menu_root.visible = true
 	menu_root.modulate.a = 1.0
 	if game_music:
