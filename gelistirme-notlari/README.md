@@ -18,6 +18,11 @@ nasıl test edilir" diye bakabilmen.
 | 2026-06-22 | [05 — Özel kart efektleri](2026-06-22-05-ozel-kart-efektleri.md) | Geliştirilmiş taş shimmer + renkli kıvılcım; joker zıplama |
 | 2026-06-23 | [06 — Geçişler + menü arkaplanı](2026-06-23-06-gecisler-menu-arkaplan.md) | Kara delik/vakum geçişi, Balatro bg (charcoal+mat kırmızı), CRT z-index/BackBufferCopy, pack dissolve/tilt |
 | 2026-06-23 | [07 — Sol panel + boss + dükkan](2026-06-23-07-sol-panel-boss-dukkan.md) | Balatro hedef kutusu + blind çipi, menü logo sheen/altyazısız, dükkanda sol panel SHOP + sürükle-bırak voucher |
+| 2026-06-23 | [08 — Dükkan düzeni + geçiş + geri sayım](2026-06-23-08-dukkan-gecis-gerisayim.md) | Kupon paket yanında, "DÜKKAN" yüksek marquee; vortex yerine yumuşak dükkan geçişi; çip×çarpan geri sayarak sıfırlanır; (perf incelemesi ertelendi) |
+| 2026-06-23 | [09 — İlk-giriş öğreticisi + King](2026-06-23-09-ogretici-king.md) | Etkileşimli öğretici (bağlamsal balon + spotlight cutout, dükkan turu, sıra düzeltildi); king.png yuvarlatıldı |
+
+## Referanslar
+- [jokerler-referans.md](jokerler-referans.md) — 62 jokerin tam etkisi + kart tasarımı için sınıflandırma
 
 ## Yol haritası / yapılacaklar
 - [YAPILACAKLAR.md](YAPILACAKLAR.md) — sıradaki istekler (alev shader, blind ekranı, paket açma, özel kart efektleri)
