@@ -204,66 +204,59 @@ func _menu_backdrop() -> StyleBoxFlat:
 	s.shadow_size = 18
 	return s
 
-# ── BAŞLIK = WORDECK harf taşları yelpazesi (ayrı metin logo yok) ──
+# ── BAŞLIK = GLYPHIX logosu (hafif bükeylik + nefes + motion blur + gölge) ──
 func _build_hero() -> void:
 	hero = Control.new()
 	hero.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	hero.offset_top = -40   # merkezin biraz üstü (başlık konumu)
-	hero.offset_bottom = -40
+	hero.offset_top = -20   # ekran ortasına yakın (artık çok yukarıda değil); butonlar altta
+	hero.offset_bottom = -20
 	hero.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu_root.add_child(hero)
-	var word := "WORDECK"
-	var n := word.length()
-	var mid := (n - 1) / 2.0
-	var step := 104.0
-	for i in n:
-		var off := i - mid
-		var tile := _hero_tile(word[i])
-		var by := off * off * 5.5 - 84.0  # yelpaze yayı (baz y)
-		tile.position = Vector2(off * step - 54.0, by)
-		tile.rotation = deg_to_rad(off * 5.0)
-		tile.set_meta("by", by)
-		hero.add_child(tile)
-	# (alt-yazı kaldırıldı — taşlar logonun kendisi)
 
-func _hero_tile(letter: String) -> Control:
-	var t := Panel.new()
-	t.custom_minimum_size = Vector2(104, 138)
-	t.size = t.custom_minimum_size
-	t.pivot_offset = t.size / 2.0
-	t.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	t.add_theme_stylebox_override("panel", T.bone_tile())
-	# Üst parlaklık (sheen) — cilalı/profesyonel his
-	var sheen := Panel.new()
-	sheen.add_theme_stylebox_override("panel", T.tile_sheen())
-	sheen.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	sheen.offset_left = 7
-	sheen.offset_right = -7
-	sheen.offset_top = 7
-	sheen.offset_bottom = 58
-	sheen.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	t.add_child(sheen)
-	var l := Label.new()
-	l.text = letter
-	l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	l.add_theme_font_override("font", T.load_tile_font())
-	l.add_theme_font_size_override("font_size", 76)
-	l.add_theme_color_override("font_color", T.INK)
-	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	t.add_child(l)
-	return t
+	var tex: Texture2D = load("res://assets/images/glyphix.png")
+	var lw := 680.0   # daha büyük başlık
+	var lh := lw * 1277.0 / 3001.0   # logonun gerçek oranı (UV temiz eşlensin → warp düzgün)
+	var pos := Vector2(-lw * 0.5, -lh * 0.5)  # merkeze
+
+	# GÖLGE (arkada): YUMUŞAK disk-blur'lu koyu silüet (keskin kopya değil) — ayrı gölge shader'ı,
+	# ama AYNI warp parametreleriyle → logoyla hizalı bükülür.
+	var sm := ShaderMaterial.new()
+	sm.shader = load("res://shaders/logo_shadow.gdshader")
+	var shadow := _logo_rect(tex, lw, lh, sm)
+	shadow.position = pos + Vector2(7, 12)
+	shadow.set_meta("by", shadow.position.y)
+	hero.add_child(shadow)
+
+	# ANA LOGO (önde) — warp + motion blur + matlık
+	var m := ShaderMaterial.new()
+	m.shader = load("res://shaders/logo_fx.gdshader")
+	var logo := _logo_rect(tex, lw, lh, m)
+	logo.position = pos
+	logo.set_meta("by", logo.position.y)
+	hero.add_child(logo)
+
+func _logo_rect(tex: Texture2D, lw: float, lh: float, m: ShaderMaterial) -> TextureRect:
+	var r := TextureRect.new()
+	r.texture = tex
+	r.expand_mode = TextureRect.EXPAND_IGNORE_SIZE  # texture doğal boyutunu DAYATMASIN (yoksa dev olur)
+	r.size = Vector2(lw, lh)
+	r.custom_minimum_size = Vector2(lw, lh)
+	r.pivot_offset = Vector2(lw * 0.5, lh * 0.5)
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	r.material = m
+	return r
 
 func _process(_delta: float) -> void:
-	# Merkez yelpazeyi hafifçe salla (yaşıyor hissi).
+	# GLYPHIX logosu + gölgesi hafifçe süzülür/sallanır (birlikte → offset korunur).
 	if hero == null or menu_root == null or not menu_root.visible:
 		return
 	var tt := Time.get_ticks_msec() / 1000.0
+	var bob := sin(tt * 1.1) * 6.0
+	var rot := sin(tt * 0.6) * deg_to_rad(0.9)  # çok hafif sallanma
 	for i in hero.get_child_count():
-		var tile: Control = hero.get_child(i)
-		var ph := i * 0.5
-		tile.position.y = float(tile.get_meta("by", 0.0)) + sin(tt * 1.4 + ph) * 3.0
+		var c: Control = hero.get_child(i)
+		c.position.y = float(c.get_meta("by", 0.0)) + bob
+		c.rotation = rot
 
 # ── Siyah geçiş katmanı ──
 func _build_fade() -> void:

@@ -21,6 +21,7 @@ nasıl test edilir" diye bakabilmen.
 | 2026-06-23 | [08 — Dükkan düzeni + geçiş + geri sayım](2026-06-23-08-dukkan-gecis-gerisayim.md) | Kupon paket yanında, "DÜKKAN" yüksek marquee; vortex yerine yumuşak dükkan geçişi; çip×çarpan geri sayarak sıfırlanır; (perf incelemesi ertelendi) |
 | 2026-06-23 | [09 — İlk-giriş öğreticisi + King](2026-06-23-09-ogretici-king.md) | Etkileşimli öğretici (bağlamsal balon + spotlight cutout, dükkan turu, sıra düzeltildi); king.png yuvarlatıldı |
 | 2026-06-23 | [10 — Skor alanı + puanlama + alev + joker art](2026-06-23-10-skor-alani-puanlama-alev-joker-art.md) | Çip×çarpan kendi kutusunda + beyaz dalgalı başlık; puanlama önizlemeden devam eder (0×1'e düşmez) + taş baloncukları; skor akınca sıfırlanır; alev daha yüksek/yavaş söner; joker kart PNG + köşe yuvarlama + sınıf parıltısı + süzülme |
+| 2026-06-23 | [11 — GLYPHIX logosu + CRT (4K)](2026-06-23-11-glyphix-logo-crt.md) | Oyun WORDECK→GLYPHIX; ana menü harf taşları yerine logo PNG (bükeylik + nefes + motion blur + matlık + yumuşak gölge); CRT tarama çizgileri çözünürlük-bağımsız (4K'da görünür) |
 
 ## Referanslar
 - [jokerler-referans.md](jokerler-referans.md) — 62 jokerin tam etkisi + kart tasarımı için sınıflandırma

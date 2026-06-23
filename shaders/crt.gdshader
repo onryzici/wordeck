@@ -5,7 +5,8 @@ shader_type canvas_item;
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
 uniform float curvature : hint_range(0.0, 0.2) = 0.05;
 uniform float aberration : hint_range(0.0, 4.0) = 1.4;
-uniform float scan_strength : hint_range(0.0, 0.4) = 0.16;
+uniform float scan_strength : hint_range(0.0, 0.4) = 0.22;
+uniform float scan_lines = 220.0;  // ekran yüksekliği boyunca SABİT çizgi sayısı (çözünürlükten bağımsız → 4K'da da görünür)
 uniform float vignette_amt : hint_range(0.0, 0.6) = 0.22;
 
 void fragment() {
@@ -22,8 +23,8 @@ void fragment() {
 		col.g = texture(screen_tex, uv).g;
 		col.b = texture(screen_tex, uv - vec2(a, 0.0)).b;
 
-		// tarama çizgileri (TV hissi — biraz daha kalın, ~3px periyot, yine hafif)
-		float s = 0.5 + 0.5 * sin(FRAGCOORD.y * 2.1);
+		// tarama çizgileri — ekran yüksekliğine oranlı (SCREEN_UV) → 4K dahil her çözünürlükte görünür
+		float s = 0.5 + 0.5 * sin(SCREEN_UV.y * scan_lines * 6.28318);
 		col *= 1.0 - scan_strength * (1.0 - s);
 
 		// vinyet
