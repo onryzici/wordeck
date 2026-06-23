@@ -10,6 +10,7 @@ static var sfx_vol := 0.9        # 0..1
 static var shake_on := true      # ekran sarsıntısı
 static var particles_on := true  # partikül/kor efektleri
 static var fullscreen := false
+static var tutorial_done := false  # ilk-giriş öğreticisi gösterildi mi (bir kez)
 static var _ready := false
 
 static func init() -> void:
@@ -24,6 +25,7 @@ static func init() -> void:
 		shake_on = cf.get_value("juice", "shake", shake_on)
 		particles_on = cf.get_value("juice", "particles", particles_on)
 		fullscreen = cf.get_value("video", "fullscreen", fullscreen)
+		tutorial_done = cf.get_value("progress", "tutorialDone", tutorial_done)
 	apply_audio()
 	apply_video()
 
@@ -34,6 +36,7 @@ static func save() -> void:
 	cf.set_value("juice", "shake", shake_on)
 	cf.set_value("juice", "particles", particles_on)
 	cf.set_value("video", "fullscreen", fullscreen)
+	cf.set_value("progress", "tutorialDone", tutorial_done)
 	cf.save(PATH)
 
 static func _ensure_buses() -> void:

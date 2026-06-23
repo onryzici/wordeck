@@ -109,6 +109,15 @@ var _shuffle_sb: StyleBoxFlat     # yuvarlak shuffle butonu dolgusu (tur rengine
 var _shuffle_hover_sb: StyleBoxFlat   # hover (açılmış + büyük gölge)
 var _shuffle_pressed_sb: StyleBoxFlat # basılı (koyu + küçük gölge)
 var _shuffle_icon: TextureRect    # pixel-art shuffle ikonu
+# ── Öğretici (ilk giriş, etkileşimli; ikon YOK, balon bağlamsal konumlanır) ──
+signal _tut_continue              # bilgi balonunda İLERİ/ATLA → bekleyen postplay'i serbest bırak
+var _tut_active := false
+var _tut_mode := ""               # "blind" / "word" / "play" (gated faz hangi olayı bekliyor)
+var _tut_layer: Control          # spotlight çerçeveleri + balon paneli
+var _tut_frames: Array = []       # spotlight cutout: 4 kenar ColorRect (üst/alt/sol/sağ)
+var _tut_panel: PanelContainer    # konuşma balonu (bağlamsal konumlanır)
+var _tut_bubble_label: Label
+var _tut_next_btn: Button
 # efekt katmanı + sarsıntı kabı
 var fx_layer: Node2D
 var shaker: Control
@@ -169,12 +178,17 @@ func _init_run() -> void:
 
 # Menüden OYNA'ya geçince: TAZE run (yeni seed → yeni kartlar) + desteden geliş + shuffle sesi.
 func enter_session() -> void:
+	_tut_reset()  # önceki (yarım bırakılmış) öğretici kalıntısını temizle
 	_reset_to_play_view()
 	_init_run()
 	_reset_flames()
 	_animate_jokers = true  # oyuna girişte jokerler (varsa) canlı gelsin
 	_refresh_hud()          # sol panel/joker (el SEÇ'te dağıtılır)
 	_open_blind_select()    # önce blind seçim ekranı (Balatro)
+	if not Settings.tutorial_done:
+		await get_tree().create_timer(1.2).timeout  # giriş vortex'i bitsin, sonra öğretici (çakışmasın)
+		if _tut_layer == null and not Settings.tutorial_done:
+			_tut_start()    # ilk giriş → etkileşimli öğretici
 
 # Alev değere göre yanar ama yalnız OYNA sonrası (_flame_on). Tur başında söndür.
 func _reset_flames() -> void:
@@ -1243,6 +1257,8 @@ func _toggle_select(card_id: int) -> void:
 	_play_card_move()
 	_layout_hand(true)
 	_update_word_display()
+	if _tut_active:
+		_tut_event("selection_changed")
 
 # Kelime bölgesindeki taşı sürükle-bırakla yeniden sırala (kelime harf sırasını değiştirir).
 func _on_tile_reorder(from_id: int, target_id: int, after: bool) -> void:
@@ -1259,6 +1275,8 @@ func _on_tile_reorder(from_id: int, target_id: int, after: bool) -> void:
 	_play_card_move()
 	_layout_hand(true)
 	_update_word_display()
+	if _tut_active:
+		_tut_event("selection_changed")
 
 # Taş sürüklerken görünen önizleme (yarı saydam kemik taş + harf, mouse'u takip eder).
 func _tile_drag_preview(id: int) -> Control:
@@ -1641,7 +1659,12 @@ func _on_play() -> void:
 	_flame_on = true  # OYNA'ya basıldı → alev artık yanabilir (değere göre)
 	_stop_pulse()
 	_set_buttons(false)
+	var _tut_guided: bool = _tut_active and _tut_mode == "play"  # SADECE rehberli OYNA basışı
+	if _tut_guided:
+		_tut_hide_for_action()  # skor animasyonu engelsiz görünsün (dim/balon gizlenir)
 	await _score_sequence(res, fired, prev_score)
+	if _tut_guided:
+		await _tut_postplay()   # açıklama balonları BİTSİN, sonra won/dükkân akışı (sıra karışmaz)
 	# Skor alındı → çip/çarpan alev tacı YANSIN (yeni tura kadar durur)
 	_set_seal_flame(chip_seal_panel, true)
 	_set_seal_flame(mult_seal_panel, true)
@@ -2632,6 +2655,8 @@ var _overlay_panel: PanelContainer
 var _shop_reward = null
 var _shop_msg := ""             # son satın alma sonucu (örn. "A harfin YALDIZ oldu")
 var _shop_tags: Array = []      # fiyat etiketleri — layout sonrası ortalanır (call_deferred)
+var _shop_shelves: Control = null  # dükkân rafları (öğretici turu konumlaması için)
+var _shop_next_btn: Button = null  # "SONRAKİ TUR" butonu (öğretici turu için)
 var _marquee_node: Control = null  # SHOP marquee (ampuller layout sonrası dizilir)
 
 func _ensure_overlay() -> void:
@@ -3030,6 +3055,8 @@ func _on_blind_select() -> void:
 	if deck_holder:
 		deck_holder.visible = true
 	_reset_flames()
+	if _tut_active:
+		_tut_event("blind_selected")
 	# Yeni el dağıtılırken önceki turun çip×çarpanı (ör. 41×24) ANINDA 0/1 olmasın →
 	# el gelirken seals PARALEL olarak geriye sayıp 0/1'e insin. _refresh'i elle sıralıyoruz
 	# ki içindeki _update_word_display sayımı anında ezmesin (bayat board flaşı da olmaz).
@@ -3063,6 +3090,8 @@ func _open_shop() -> void:
 	_set_shop_sidebar(true)  # sol panel tepesi → SHOP marquee
 	_rebuild_jokers()  # üst jokerler artık tıkla → SAT
 	_build_shop_ui()
+	if _tut_active and _tut_mode == "await_shop":
+		_tut_shop_tour()  # öğretici: dükkân anlatımı (turu geçip dükkâna ilk girişte)
 
 # Arcade marquee kutusu (Balatro "SHOP" — kırmızı dolgu, kalın koyu kenar).
 func _marquee_box() -> StyleBoxFlat:
@@ -3131,6 +3160,7 @@ func _build_shop_ui() -> void:
 	nb.custom_minimum_size = Vector2(0, 96)
 	nb.pressed.connect(_on_next_blind)
 	acol.add_child(nb)
+	_shop_next_btn = nb  # öğretici turu için referans
 	var can_rr: bool = state["run"]["money"] >= shop["rerollCost"]
 	var rr := _chunky_btn("YENİLE\n$%d" % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
 	rr.custom_minimum_size = Vector2(0, 74)
@@ -3145,6 +3175,7 @@ func _build_shop_ui() -> void:
 	shelves.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	shelves.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	trow.add_child(shelves)
+	_shop_shelves = shelves  # öğretici turu için referans
 
 	var bc = state["run"]["boosterChoices"]
 	var ec = state["run"].get("enhancerChoices", null)
@@ -4032,6 +4063,8 @@ func _open_win() -> void:
 	_present_overlay()
 
 func _open_lose() -> void:
+	if _tut_active:
+		_tut_finish()  # öğretici sırasında kaybedildi → asılı kalmasın
 	_clear_overlay()
 	_theme_overlay(Color(0.22, 0.02, 0.02, 0.82), T.MULT)  # KIRMIZI game-over teması
 	overlay_card.add_child(_wavy_label("OYUN BİTTİ", 56, T.MULT, T.OUTLINE, 11.0, 2.6, 6))
@@ -4212,3 +4245,243 @@ func demo_jokers() -> void:
 		JokerActions.add_joker_by_id(state, jid)
 	_animate_jokers = true
 	_refresh(false, false)
+
+
+# ════════════════ ÖĞRETİCİ (ilk giriş, etkileşimli; ikon YOK) ════════════════
+# YAPTIRARAK öğretir: tur seç → kelime kur → OYNA → (skor) açıklama balonları.
+# Balon o adımın İLGİLENDİRDİĞİ öğenin yanına konumlanır (bağlamsal) ve o öğeyi spotlight eder.
+# Sadece ilk açılışta; ATLA her an kapatır. Skor sonrası balonlar won→dükkan akışından ÖNCE
+# _on_play'i bekletir (await _tut_postplay) → "TUR GEÇİLDİ" ile sıra karışmaz.
+# Konumlamada ÖNEMLİ: yeni el ASENKRON dağıtıldığından hedef rect'i bekleyip TAZE alırız.
+
+func _tut_start() -> void:
+	if _tut_active:
+		return
+	_tut_active = true
+	_tut_build_layer()
+	_tut_layer.modulate.a = 0.0
+	create_tween().tween_property(_tut_layer, "modulate:a", 1.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_tut_goto_blind()
+
+func _tut_build_layer() -> void:
+	_tut_layer = Control.new()
+	_tut_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_tut_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tut_layer.z_index = 70
+	add_child(_tut_layer)
+	_tut_frames = []
+	for i in 4:
+		var fr := ColorRect.new()
+		fr.color = Color(0.02, 0.01, 0.0, 1.0)
+		fr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_tut_layer.add_child(fr)
+		_tut_frames.append(fr)
+	# Konuşma balonu (bağlamsal konumlanır)
+	_tut_panel = PanelContainer.new()
+	var bsb := StyleBoxFlat.new()
+	bsb.bg_color = Color("f4ead2")
+	bsb.set_corner_radius_all(14)
+	bsb.set_border_width_all(4)
+	bsb.border_color = Color("2a1c0e")
+	bsb.shadow_color = Color(0, 0, 0, 0.5)
+	bsb.shadow_size = 10
+	bsb.shadow_offset = Vector2(0, 6)
+	bsb.content_margin_left = 20
+	bsb.content_margin_right = 20
+	bsb.content_margin_top = 16
+	bsb.content_margin_bottom = 16
+	_tut_panel.add_theme_stylebox_override("panel", bsb)
+	_tut_panel.visible = false
+	_tut_layer.add_child(_tut_panel)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	_tut_panel.add_child(vb)
+	_tut_bubble_label = _label("", 23, Color("2a1c0e"), Color("f4ead2"), 0)
+	_tut_bubble_label.add_theme_font_override("font", T.load_font())
+	_tut_bubble_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_tut_bubble_label.custom_minimum_size = Vector2(360, 0)
+	vb.add_child(_tut_bubble_label)
+	_tut_next_btn = _chunky_btn("İLERİ →", T.GOOD, T.INK)
+	_tut_next_btn.custom_minimum_size = Vector2(0, 52)
+	_tut_next_btn.pressed.connect(func(): emit_signal("_tut_continue"))
+	vb.add_child(_tut_next_btn)
+	var skip := _chunky_btn("Öğreticiyi atla", T.FELT_700, T.TEXT)
+	skip.add_theme_font_size_override("font_size", 17)
+	skip.custom_minimum_size = Vector2(0, 36)
+	skip.pressed.connect(_tut_finish)
+	vb.add_child(skip)
+
+# ── Faz 1: gated adımlar (olay bekler, buton yok) ──
+func _tut_goto_blind() -> void:
+	_tut_mode = "blind"
+	# blind ekranı serbest tıklanmalı → dim YOK, blok YOK; balon kolonların üstünde
+	await _tut_present("Hoş geldin! 👋\nBaşlamak için bir TUR seç.",
+		func(): return _tut_node_rect(blind_view), "above", 0.0, false, false)
+
+func _tut_goto_word() -> void:
+	_tut_mode = "word"
+	await _tut_present("Harflere dokunarak bir KELİME kur.\nGeçerli olunca OYNA yeşil yanar.",
+		func(): return _tut_node_rect(hand_area), "above", 0.6, true, false)
+
+func _tut_goto_play() -> void:
+	_tut_mode = "play"
+	await _tut_present("Hazır! Şimdi OYNA'ya bas 👇",
+		func(): return _tut_node_rect(hand_area).merge(_tut_node_rect(play_btn)), "above", 0.6, true, false)
+
+func _tut_event(name: String) -> void:
+	if not _tut_active:
+		return
+	if _tut_mode == "blind" and name == "blind_selected":
+		_tut_goto_word()
+	elif _tut_mode == "word" and name == "selection_changed" and _is_current_valid():
+		_tut_goto_play()
+
+# OYNA'ya basıldı → skor animasyonu engelsiz görünsün (öğretici geçici gizlenir).
+func _tut_hide_for_action() -> void:
+	if _tut_layer != null:
+		_tut_layer.visible = false
+
+# ── Faz 2: skor sonrası açıklama balonları (won/dükkan akışından ÖNCE; awaitable) ──
+func _tut_postplay() -> void:
+	if not _tut_active or _tut_layer == null:
+		return
+	_tut_mode = ""
+	_tut_layer.visible = true
+	await _tut_info("ÇİP × ÇARPAN = kazandığın PUAN!\nSol üstte TUR SKORU yükseldi.",
+		func(): return _tut_node_rect(chip_seal_panel).merge(_tut_node_rect(mult_seal_panel)), "right")
+	if not _tut_active: return
+	await _tut_info("İşine yaramayan harfleri DEĞİŞTİR ile\natıp yenilerini çekebilirsin (hakkın sınırlı).",
+		func(): return _tut_node_rect(disc_btn), "above")
+	if not _tut_active: return
+	await _tut_info("Hedef PUANA ulaşana dek kelime\noynamaya devam et. Hedefi aşınca\nTUR GEÇİLİR ve DÜKKAN açılır! 👇",
+		null, "center", "TAMAM")
+	if not _tut_active: return
+	# Bitirme YOK — dükkan açılınca devam (turu geçmek birkaç el sürebilir).
+	_tut_mode = "await_shop"
+	if _tut_layer != null:
+		_tut_layer.visible = false  # dükkana kadar normal oyna (engel yok)
+
+# Dükkan turu: turu geçip dükkana İLK girişte (await_shop) → dükkanı anlat, sonra bitir.
+func _tut_shop_tour() -> void:
+	if not _tut_active or _tut_layer == null:
+		return
+	_tut_mode = "shop"
+	await get_tree().create_timer(0.7).timeout  # dükkan açılış geçişi otursun
+	if not _tut_active or _tut_layer == null:
+		return
+	await _tut_info("İşte DÜKKAN! 👑\nKazandığın parayla güçlenirsin.\nJOKER al — her kelimede otomatik\nbonus verir, puanını KATLAR.",
+		func(): return _tut_node_rect(_shop_shelves), "above")
+	if not _tut_active: return
+	await _tut_info("Paketlerden yeni HARF / CİLA çek.\nVitrin kötüyse YENİLE ile değiştir.",
+		func(): return _tut_node_rect(_shop_shelves), "above")
+	if not _tut_active: return
+	await _tut_info("Hazır olunca SONRAKİ TUR ile\ndevam et. İyi oyunlar! 👑",
+		func(): return _tut_node_rect(_shop_next_btn), "right", "BAŞLA!")
+	_tut_finish()
+
+# Bilgi balonu: ilgili öğeyi spotlight + balon, oyuncu İLERİ/ATLA'ya basana kadar BEKLE.
+func _tut_info(text: String, rect_fn, place: String, btn: String = "İLERİ →") -> void:
+	if not _tut_active or _tut_layer == null:
+		return
+	await _tut_present(text, rect_fn, place, 0.62, rect_fn != null, true, btn)
+	if not _tut_active or _tut_layer == null:
+		return
+	await _tut_continue  # İLERİ veya ATLA
+
+# Tek noktadan sunum: (gerekirse layout bekle) → TAZE rect → spotlight/dim + bağlamsal konum.
+# rect_fn: Callable döndüren Rect2 (null → merkez, dim tam). spotlight: rect deliğini aç.
+func _tut_present(text: String, rect_fn, place: String, alpha: float, spotlight: bool, btn_visible: bool, btn: String = "İLERİ →") -> void:
+	if _tut_layer == null:
+		return
+	_tut_layer.visible = true
+	_tut_panel.visible = false  # konumlanana kadar gizle (sol-üstte flaş olmasın)
+	_tut_bubble_label.text = text
+	_tut_next_btn.visible = btn_visible
+	if btn_visible:
+		_tut_next_btn.text = btn
+	# Layout otursun (yeni el async) + balon boyutu (yeni metin) hesaplansın
+	await get_tree().create_timer(0.18).timeout
+	if _tut_layer == null or not is_instance_valid(_tut_layer):
+		return
+	await get_tree().process_frame
+	if _tut_layer == null or not is_instance_valid(_tut_layer):
+		return
+	var rect: Rect2 = rect_fn.call() if rect_fn != null else Rect2()
+	# Karartma / spotlight
+	if alpha <= 0.01:
+		_tut_set_cutout(Rect2(), 0.0, false)  # dim yok, her yer tıklanır (blind)
+	elif spotlight and rect.size != Vector2.ZERO:
+		_tut_set_cutout(rect.grow(16), alpha, true)
+	else:
+		_tut_set_cutout(Rect2(), alpha, true)
+	# Balonu bağlamsal konumla + göster
+	_tut_position_panel(rect, place)
+	_tut_panel.visible = true
+
+func _tut_position_panel(rect: Rect2, place: String) -> void:
+	var W: float = _tut_layer.size.x
+	var H: float = _tut_layer.size.y
+	var bs: Vector2 = _tut_panel.size
+	var gap := 26.0
+	var pos: Vector2
+	if rect.size == Vector2.ZERO:
+		pos = Vector2((W - bs.x) * 0.5, (H - bs.y) * 0.5)
+	else:
+		match place:
+			"above": pos = Vector2(rect.get_center().x - bs.x * 0.5, rect.position.y - bs.y - gap)
+			"below": pos = Vector2(rect.get_center().x - bs.x * 0.5, rect.end.y + gap)
+			"right": pos = Vector2(rect.end.x + gap, rect.get_center().y - bs.y * 0.5)
+			"left": pos = Vector2(rect.position.x - bs.x - gap, rect.get_center().y - bs.y * 0.5)
+			_: pos = Vector2((W - bs.x) * 0.5, (H - bs.y) * 0.5)
+	pos.x = clampf(pos.x, 16.0, max(16.0, W - bs.x - 16.0))
+	pos.y = clampf(pos.y, 16.0, max(16.0, H - bs.y - 16.0))
+	_tut_panel.position = pos
+
+func _tut_node_rect(n) -> Rect2:
+	if n != null and is_instance_valid(n) and n is Control:
+		return (n as Control).get_global_rect()
+	return Rect2()
+
+# Spotlight cutout: hedefin etrafını 4 kenarla karart, ORTASI delik. rect boşsa tüm ekran.
+func _tut_set_cutout(rect: Rect2, alpha: float, block: bool) -> void:
+	if _tut_layer == null:
+		return
+	var W: float = _tut_layer.size.x
+	var H: float = _tut_layer.size.y
+	var rects: Array
+	if rect.size == Vector2.ZERO:
+		rects = [Rect2(0, 0, W, H), Rect2(), Rect2(), Rect2()]
+	else:
+		var x0: float = clampf(rect.position.x, 0, W)
+		var y0: float = clampf(rect.position.y, 0, H)
+		var x1: float = clampf(rect.end.x, 0, W)
+		var y1: float = clampf(rect.end.y, 0, H)
+		rects = [Rect2(0, 0, W, y0), Rect2(0, y1, W, H - y1), Rect2(0, y0, x0, y1 - y0), Rect2(x1, y0, W - x1, y1 - y0)]
+	for i in 4:
+		var fr: ColorRect = _tut_frames[i]
+		fr.position = rects[i].position
+		fr.size = rects[i].size
+		fr.color.a = alpha
+		fr.mouse_filter = Control.MOUSE_FILTER_STOP if block else Control.MOUSE_FILTER_IGNORE
+
+func _tut_finish() -> void:
+	if not _tut_active:
+		return
+	_tut_active = false
+	_tut_mode = ""
+	emit_signal("_tut_continue")  # bekleyen _tut_info varsa serbest bırak (soft-lock yok)
+	if _tut_layer != null and is_instance_valid(_tut_layer):
+		_tut_layer.queue_free()
+	_tut_layer = null
+	Settings.tutorial_done = true
+	Settings.save()
+
+# Yarım bırakılmış öğreticiyi temizle (menüye dönüp tekrar girince taze başlasın).
+# tutorial_done'a DOKUNMAZ → bitmediyse sonraki girişte yine gösterilir.
+func _tut_reset() -> void:
+	_tut_active = false
+	_tut_mode = ""
+	emit_signal("_tut_continue")
+	if _tut_layer != null and is_instance_valid(_tut_layer):
+		_tut_layer.queue_free()
+	_tut_layer = null
