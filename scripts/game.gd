@@ -73,6 +73,7 @@ var deck_count_label: Label
 var tier_label: Label
 var chip_value: Label
 var mult_value: Label
+var _seal_cd_tw: Tween           # çip×çarpan "geriye sayarak sıfırlanma" tween'i (yeni el)
 var chip_seal_panel: Control
 var mult_seal_panel: Control
 var plays_value: Label
@@ -842,7 +843,8 @@ func _set_shop_sidebar(on: bool) -> void:
 		return
 	if on:
 		_head_panel.add_theme_stylebox_override("panel", _marquee_box())  # kırmızı marquee
-		blind_header.text = "DÜKKÂN"
+		_head_panel.custom_minimum_size = Vector2(0, 104)  # marquee daha yüksek (kullanıcı)
+		blind_header.text = "DÜKKAN"  # şapkasız A (kullanıcı)
 		blind_header.add_theme_color_override("font_color", Color(1.0, 0.86, 0.32))  # altın
 		if _target_box != null:
 			_target_box.visible = false
@@ -850,6 +852,7 @@ func _set_shop_sidebar(on: bool) -> void:
 			boss_panel.visible = false
 	else:
 		_head_panel.add_theme_stylebox_override("panel", _head_sb_normal)
+		_head_panel.custom_minimum_size = Vector2(0, 0)
 		blind_header.add_theme_color_override("font_color", T.INK)
 		if _target_box != null:
 			_target_box.visible = true
@@ -1549,6 +1552,9 @@ func _is_current_valid() -> bool:
 # Kelime tahtası YOK → geçerlilik geri bildirimi OYNA butonunda (yeşil parlar + nabız) +
 # canlı çip/çarpan önizlemesi sol panelde. Seçili taşlar geçerlide yeşil ışıldar.
 func _update_word_display() -> void:
+	# Oyuncu taş seçtiyse devam eden "geri sayım" animasyonunu kes (önizleme öncelikli).
+	if _seal_cd_tw != null and _seal_cd_tw.is_valid():
+		_seal_cd_tw.kill()
 	var cards := _selected_cards()
 	if _is_current_valid():
 		var res := Scoring.score_word(state, cards, true)
@@ -1654,6 +1660,7 @@ func _on_play() -> void:
 		# Oynanan taşlar sağa süzülür + SADECE kullanılan kadar yeni taş desteden gelir (kalanlar durur)
 		_refresh_hud()  # sol panel/joker/sayaç güncelle (el'e dokunma — _refill_hand yapar)
 		await _refill_hand(fired, true)
+		await _countdown_seals(0.32)  # çip×çarpan geriye sayarak 0/1'e insin (anında değil)
 		_update_word_display()
 
 func _on_discard() -> void:
@@ -2037,6 +2044,24 @@ func _count_label(label: Label, to: int, dur: float) -> void:
 	var from := int(label.text) if label.text.is_valid_int() else 0
 	var tw := create_tween()
 	tw.tween_method(func(v): label.text = str(int(round(v))), float(from), float(to), dur)
+
+# Yeni ele geçerken çip×çarpan ANINDA 0/1 yapılmasın → geriye doğru HIZLICA sayıp insin (hoş).
+# Oyuncu bu sırada taş seçerse _update_word_display tween'i öldürür (önizleme öncelikli).
+func _countdown_seals(dur: float) -> void:
+	var c_from := int(chip_value.text) if chip_value.text.is_valid_int() else 0
+	var m_from := float(mult_value.text) if mult_value.text.is_valid_float() else 1.0
+	if c_from <= 0 and m_from <= 1.0:
+		return  # zaten sıfırda → animasyon gereksiz
+	if _seal_cd_tw != null and _seal_cd_tw.is_valid():
+		_seal_cd_tw.kill()
+	_seal_cd_tw = create_tween()
+	_seal_cd_tw.set_parallel(true)
+	_seal_cd_tw.tween_method(func(v): chip_value.text = str(int(round(v))), float(c_from), 0.0, dur).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	# Çarpan da YUVARLANMIŞ tam sayı gösterilir (ham float "0.9485845" gibi ondalık çıkmasın);
+	# zaten 1'e iniyor → tam sayı adımları temiz durur.
+	_seal_cd_tw.tween_method(func(v): mult_value.text = _fmt(round(v)), m_from, 1.0, dur).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	# tween öldürülürse finished gelmez → güvenli olması için süreyi timer ile bekle
+	await get_tree().create_timer(dur).timeout
 
 # Etiketin yazı rengini kısa süre flash_color'a çevirip beyaza geri döndürür (parlama).
 func _flash_color(label: Label, flash_color: Color, dur: float) -> void:
@@ -2768,7 +2793,8 @@ func _on_cash_out_continue() -> void:
 	_close_overlay()
 	_go_to_shop()
 
-# Dükkana gidiş geçişi: ekran girdaba çekilip siyaha çöker → dükkan kurulur → çıkılır.
+# Dükkana gidiş geçişi: YUMUŞAK kararma → dükkan kurulur → hafif ölçek-pop ile belirir.
+# (Girdap/vortex artık SADECE oyun başlangıcında — main.gd. Bu "diğer ekran" geçişi sakin/akıcı.)
 func _go_to_shop() -> void:
 	if _busy:
 		_open_shop()
@@ -2777,25 +2803,28 @@ func _go_to_shop() -> void:
 	var cover := ColorRect.new()
 	cover.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	cover.mouse_filter = Control.MOUSE_FILTER_STOP
+	cover.color = Color(0.03, 0.07, 0.055)  # koyu keçe (saf siyah değil → sıcak his)
+	cover.modulate.a = 0.0
 	cover.z_index = 95  # board içeriğinin üstünde, overlay'in (100) altında
-	var mat := ShaderMaterial.new()
-	mat.shader = load("res://shaders/vortex_transition.gdshader")
-	mat.set_shader_parameter("progress", 0.0)
-	cover.material = mat
 	add_child(cover)
 	_play_card_move()  # whoosh
-	# Kara deliğe çekiliş: içerik merkeze akar → siyah
+	# 1) Yumuşak kararma (ekran koyu keçeye süzülür)
 	var tin := create_tween()
-	tin.tween_method(func(v): mat.set_shader_parameter("progress", v), 0.0, 1.0, 1.0).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
+	tin.tween_property(cover, "modulate:a", 1.0, 0.30).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	await tin.finished
-	_open_shop()                       # siyahken görünümü değiştir
-	_add_trauma(0.12)                  # hafif "yerleşme" vurgusu
+	# 2) Görünümü kapalıyken değiştir
+	_open_shop()
 	await get_tree().process_frame     # dükkan layout otursun
-	# TERS kara delik: dükkan girdaptan açılarak gelir (progress 1→0)
+	# 3) Dükkan hafif ölçek-pop ile açılır + örtü yumuşakça kalkar (girdap yok, akıcı)
+	shop_view.pivot_offset = shop_view.size * 0.5
+	shop_view.scale = Vector2(0.965, 0.965)
 	var tout := create_tween()
-	tout.tween_method(func(v): mat.set_shader_parameter("progress", v), 1.0, 0.0, 0.85).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tout.tween_callback(cover.queue_free)
+	tout.set_parallel(true)
+	tout.tween_property(cover, "modulate:a", 0.0, 0.42).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tout.tween_property(shop_view, "scale", Vector2.ONE, 0.48).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tout.chain().tween_callback(cover.queue_free)
 	tout.tween_callback(func(): _busy = false)
+	_add_trauma(0.06)                  # çok hafif "yerleşme" vurgusu
 
 # ── BLIND SEÇİM EKRANI (Balatro "Choose your next Blind") — TAHTA-İÇİ uzun kolonlar ──
 func _open_blind_select() -> void:
@@ -3001,7 +3030,13 @@ func _on_blind_select() -> void:
 	if deck_holder:
 		deck_holder.visible = true
 	_reset_flames()
-	_refresh(true, true)  # el SEÇ'te dağıtılır (desteden gelir + shuffle)
+	# Yeni el dağıtılırken önceki turun çip×çarpanı (ör. 41×24) ANINDA 0/1 olmasın →
+	# el gelirken seals PARALEL olarak geriye sayıp 0/1'e insin. _refresh'i elle sıralıyoruz
+	# ki içindeki _update_word_display sayımı anında ezmesin (bayat board flaşı da olmaz).
+	_refresh_hud()
+	_rebuild_hand(true, true)        # el SEÇ'te dağıtılır (desteden gelir + shuffle)
+	await _countdown_seals(0.34)     # seals geriye sayarak 0/1 (el dağıtımıyla aynı anda)
+	_update_word_display()
 
 func _on_blind_skip() -> void:
 	var r := Round.skip_blind(state)
@@ -3039,8 +3074,8 @@ func _marquee_box() -> StyleBoxFlat:
 	s.border_width_top = 4
 	s.border_width_bottom = 6
 	s.border_color = Color(0.09, 0.04, 0.03)
-	s.content_margin_top = 6
-	s.content_margin_bottom = 9
+	s.content_margin_top = 22
+	s.content_margin_bottom = 24
 	s.content_margin_left = 24
 	s.content_margin_right = 24
 	s.shadow_color = Color(0, 0, 0, 0.4)
@@ -3078,10 +3113,6 @@ func _build_shop_ui() -> void:
 		shop_view.add_child(_center(_label(_shop_msg, 16, T.EMBER)))
 
 	var shop = state["run"]["shop"]
-
-	# ── KUPON kartı (Balatro üst "extra" satın alma spotu — ortalanmış tek kart) ──
-	if shop["voucher"] != null:
-		shop_view.add_child(_center_h(_voucher_card(shop["voucher"])))
 
 	# ── TEZGAH (tray) — felt'ten biraz açık, kalın koyu kenar, yuvarlak ──
 	var tray := PanelContainer.new()
@@ -3210,10 +3241,12 @@ func _shop_joker_slots(shop) -> Array:
 
 func _shop_pack_slots(shop) -> Array:
 	var out := []
-	# (kupon artık üstteki ayrı barda — pakette değil)
 	var can_boost: bool = (not shop["booster"]["used"]) and state["run"]["money"] >= shop["booster"]["cost"]
 	out.append(_priced_slot(_pack_visual("HARF\nPAKETİ", "desteye +1 harf", T.GOOD),
 		150, 184, "$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
+	# KUPON — harf paketinin YANINDA (kullanıcı); sürükle-bırak/tıkla satın alma korunur.
+	if shop["voucher"] != null:
+		out.append(_voucher_card(shop["voucher"]))
 	var enh = shop.get("enhancer", null)
 	if enh != null:
 		var can_enh: bool = (not enh["used"]) and state["run"]["money"] >= enh["cost"]
