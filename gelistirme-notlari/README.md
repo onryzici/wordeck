@@ -20,6 +20,7 @@ nasıl test edilir" diye bakabilmen.
 | 2026-06-23 | [07 — Sol panel + boss + dükkan](2026-06-23-07-sol-panel-boss-dukkan.md) | Balatro hedef kutusu + blind çipi, menü logo sheen/altyazısız, dükkanda sol panel SHOP + sürükle-bırak voucher |
 | 2026-06-23 | [08 — Dükkan düzeni + geçiş + geri sayım](2026-06-23-08-dukkan-gecis-gerisayim.md) | Kupon paket yanında, "DÜKKAN" yüksek marquee; vortex yerine yumuşak dükkan geçişi; çip×çarpan geri sayarak sıfırlanır; (perf incelemesi ertelendi) |
 | 2026-06-23 | [09 — İlk-giriş öğreticisi + King](2026-06-23-09-ogretici-king.md) | Etkileşimli öğretici (bağlamsal balon + spotlight cutout, dükkan turu, sıra düzeltildi); king.png yuvarlatıldı |
+| 2026-06-23 | [10 — Skor alanı + puanlama + alev + joker art](2026-06-23-10-skor-alani-puanlama-alev-joker-art.md) | Çip×çarpan kendi kutusunda + beyaz dalgalı başlık; puanlama önizlemeden devam eder (0×1'e düşmez) + taş baloncukları; skor akınca sıfırlanır; alev daha yüksek/yavaş söner; joker kart PNG + köşe yuvarlama + sınıf parıltısı + süzülme |
 
 ## Referanslar
 - [jokerler-referans.md](jokerler-referans.md) — 62 jokerin tam etkisi + kart tasarımı için sınıflandırma

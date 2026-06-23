@@ -70,7 +70,8 @@ var blind_chip_icon: Label
 var _chip_sb: StyleBoxFlat       # blind çipi stylebox (renk güncellenir)
 var round_score_label: Label
 var deck_count_label: Label
-var tier_label: Label
+var tier_label: RichTextLabel  # kelime-tipi etiketi — dalgalı (Meksika dalgası) + belirir/kaybolur
+var _tier_shown := false        # etiket şu an görünür mü (giriş/çıkış animasyonu için)
 var chip_value: Label
 var mult_value: Label
 var _seal_cd_tw: Tween           # çip×çarpan "geriye sayarak sıfırlanma" tween'i (yeni el)
@@ -211,10 +212,12 @@ func _drive_seal_flame(seal) -> void:
 	# Alev YALNIZCA puan alırken (OYNA sonrası, _flame_on) belirir; normalde 0 (kutu sade).
 	var target := 0.0
 	if _flame_on and val > 1.0:
-		target = clampf(0.5 + (val / ref) * 0.5, 0.0, 1.0)
+		target = clampf(0.68 + (val / ref) * 0.45, 0.0, 1.0)  # daha YÜKSEK/dolgun alev
 	var cur: float = seal.get_meta("flame_i", 0.0)
-	cur = lerpf(cur, target, 0.12)
-	if cur < 0.02:
+	# Yükselirken çabuk, SÖNERKEN yavaş → "yavaşça sönüyor" hissi (ani gitmez)
+	var rate := 0.12 if target > cur else 0.035
+	cur = lerpf(cur, target, rate)
+	if cur < 0.008:
 		cur = 0.0  # tamamen sön (ani zıplama yok)
 	seal.set_meta("flame_i", cur)
 	(crown.material as ShaderMaterial).set_shader_parameter("intensity", cur)
@@ -416,30 +419,43 @@ func _build_left_panel() -> Control:
 	score_panel.add_child(sp)
 	v.add_child(score_panel)
 
-	# Kademe (kelime tipi / seviye) — Balatro: çip×çarpan kutularının ÜSTÜNDE
-	tier_label = _center(_label("—", 22, T.ORANGE))
+	# Kademe (kelime tipi) + çip×çarpan → KENDİ ALANINDA (Balatro skor kutusu gibi, çevreli kutu)
+	var score_area := PanelContainer.new()
+	var area_sb := T.felt_panel(T.FELT_800, T.LINE, 16)
+	area_sb.content_margin_left = 6
+	area_sb.content_margin_right = 6
+	area_sb.content_margin_top = 8
+	area_sb.content_margin_bottom = 10
+	_themed_sbs.append(area_sb)  # palete göre renklensin
+	score_area.add_theme_stylebox_override("panel", area_sb)
+	var av := VBoxContainer.new()
+	av.add_theme_constant_override("separation", 6)
+	score_area.add_child(av)
+
+	# Kelime tipi/seviye — BEYAZ + büyük punto (kendi alanının başlığı gibi)
+	# Dalgalı (Meksika dalgası) etiket — başta gizli (kelime seçilince yumuşakça belirir)
+	tier_label = _wavy_label("—", 38, Color.WHITE, T.OUTLINE, 6, 3.0)
 	tier_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.add_child(tier_label)
+	tier_label.modulate.a = 0.0
+	av.add_child(tier_label)
 
 	var crown_gap := Control.new()  # alev tacı için küçük pay (skorda kutu üstünde belirir)
-	crown_gap.custom_minimum_size = Vector2(0, 12)
-	v.add_child(crown_gap)
+	crown_gap.custom_minimum_size = Vector2(0, 10)
+	av.add_child(crown_gap)
 
 	var seals := HBoxContainer.new()
-	seals.add_theme_constant_override("separation", 8)
+	seals.add_theme_constant_override("separation", 6)
 	seals.alignment = BoxContainer.ALIGNMENT_CENTER
-	chip_value = _center(_label("0", 50, Color.WHITE, T.CHIP_BADGE, 6))
-	mult_value = _center(_label("1", 50, Color.WHITE, T.MULT, 6))
-	chip_seal_panel = _seal(chip_value, T.CHIP, Vector2(140, 86), 90.0)
-	mult_seal_panel = _seal(mult_value, T.MULT, Vector2(140, 86), 14.0)
+	chip_value = _center(_label("0", 52, Color.WHITE, T.CHIP_BADGE, 6))
+	mult_value = _center(_label("1", 52, Color.WHITE, T.MULT, 6))
+	# Daha GENİŞ + daha ALÇAK kutular (kullanıcı isteği)
+	chip_seal_panel = _seal(chip_value, T.CHIP, Vector2(150, 74), 90.0)
+	mult_seal_panel = _seal(mult_value, T.MULT, Vector2(150, 74), 14.0)
 	seals.add_child(chip_seal_panel)
-	seals.add_child(_center(_label("×", 60, T.TEXT)))  # büyük çarpı işareti
+	seals.add_child(_center(_label("×", 50, T.TEXT)))  # çarpı işareti
 	seals.add_child(mult_seal_panel)
-	v.add_child(seals)
-
-	var gap := Control.new()
-	gap.custom_minimum_size = Vector2(0, 6)
-	v.add_child(gap)
+	av.add_child(seals)
+	v.add_child(score_area)
 
 	# Alt blok — referans: solda 2 chunky buton, sağda etiket+girintili-değer panelleri.
 	var bottom := HBoxContainer.new()
@@ -591,7 +607,7 @@ func _seal(value_label: Label, color: Color, msize: Vector2, val_ref: float) -> 
 	root.add_child(box)
 
 	# Alev tacı — kutunun hemen üstünde; intensity (boy) _drive_seal_flame'de PUAN'a göre sürülür.
-	var crown_h := 40.0
+	var crown_h := 56.0  # daha YÜKSEK alev (kullanıcı isteği)
 	var inset := 12.0
 	var crown := ColorRect.new()
 	crown.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # pixel keskin kalsın
@@ -628,10 +644,65 @@ func _build_joker_shelf() -> Control:
 	box.add_child(joker_box)
 	return box
 
-func _joker_card_sb(accent: Color) -> StyleBoxFlat:
+# Özel joker kart görselleri (tam-kart PNG, 122×150 oranında pixel-art). id → yol.
+const JOKER_ART := {
+	"anagram-seytani": "res://assets/images/jokers/anagram-seytani.png",
+}
+
+# Joker kart yüzü: özel görseli varsa tam-kart PNG (keskin pixel-art), yoksa stylebox+emoji düzeni.
+func _joker_face(joker: Dictionary, rarity: Color) -> Control:
+	var jid := String(joker.get("id", ""))
+	if JOKER_ART.has(jid):
+		var tex := TextureRect.new()
+		tex.texture = load(JOKER_ART[jid])
+		tex.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		tex.offset_left = 3; tex.offset_top = 3; tex.offset_right = -3; tex.offset_bottom = -3  # kenar içinde
+		tex.custom_minimum_size = Vector2(116, 144)
+		tex.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tex.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_SCALE
+		tex.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # pixel-art keskin kalsın
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Görselin köşeleri YUVARLANSIN (kare art → yuvarlak karta uysun)
+		var rm := ShaderMaterial.new()
+		rm.shader = load("res://shaders/card_round.gdshader")
+		rm.set_shader_parameter("radius_px", 20.0)
+		tex.material = rm
+		return tex
+	return _joker_inner(joker, rarity)
+
+# Nadirliğe (sınıfa) göre kart parıltısı: çapraz kayan ışık bandı (tile_shimmer — sevilen efekt).
+const JOKER_SHINE := {
+	"uncommon": {"strength": 0.16, "speed": 0.45},
+	"rare": {"strength": 0.26, "speed": 0.55},
+	"legendary": {"strength": 0.40, "speed": 0.72},
+}
+
+# Kart üstüne nadirlik parıltısı overlay'i (yoksa null). Art kartlarda da çalışır (üstte süzülür).
+func _joker_shine(rarity_str: String, accent: Color) -> ColorRect:
+	if not Settings.particles_on or not JOKER_SHINE.has(rarity_str):
+		return null
+	var cfg: Dictionary = JOKER_SHINE[rarity_str]
+	var r := ColorRect.new()
+	r.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	r.offset_left = 3; r.offset_top = 3; r.offset_right = -3; r.offset_bottom = -3
+	r.color = Color.WHITE
+	r.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var m := ShaderMaterial.new()
+	m.shader = load("res://shaders/tile_shimmer.gdshader")
+	m.set_shader_parameter("tint", accent.lerp(Color.WHITE, 0.5))  # nadirlik tonu + parlak gloss
+	m.set_shader_parameter("strength", float(cfg["strength"]))
+	m.set_shader_parameter("speed", float(cfg["speed"]))
+	m.set_shader_parameter("cells", 26.0)
+	r.material = m
+	return r
+
+func _joker_card_sb(accent: Color, radius: int = 9) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = T.FELT_800
-	s.set_corner_radius_all(9)
+	s.set_corner_radius_all(radius)
 	s.set_border_width_all(3)
 	s.border_color = accent
 	s.shadow_color = Color(0, 0, 0, 0.5)
@@ -678,8 +749,9 @@ func _make_joker_slot() -> Control:
 
 func _make_joker_card(joker: Dictionary) -> Control:
 	var rarity: Color = T.RARITY.get(joker.get("rarity", "common"), T.CARD_EDGE)
+	var rstr := String(joker.get("rarity", "common"))
 	var p := JokerCard.new()  # sürüklenebilir kart (yeniden sıralama)
-	p.add_theme_stylebox_override("panel", _joker_card_sb(rarity))
+	p.add_theme_stylebox_override("panel", _joker_card_sb(rarity))  # yuvarlak (9); art görseli de yuvarlanır
 	p.custom_minimum_size = Vector2(122, 150)
 	p.set_meta("jid", String(joker["id"]))  # skorlamada tetikleneni bulmak için
 	p.tooltip_text = "%s\n%s\n(sürükleyerek sırala)" % [joker["name"], joker["description"]]
@@ -688,7 +760,10 @@ func _make_joker_card(joker: Dictionary) -> Control:
 	p.reorder_cb = _on_joker_reorder
 	p.preview_cb = _joker_drag_preview
 	p.draggable = not _shop_mode and state["run"]["jokers"].size() >= 2
-	p.add_child(_joker_inner(joker, rarity))
+	p.add_child(_joker_face(joker, rarity))
+	var shine := _joker_shine(rstr, rarity)  # sınıfa (nadirlik) göre parıltı efekti
+	if shine != null:
+		p.add_child(shine)
 	return p
 
 # Joker kartının iç düzeni: ÜST isim plakası (nadirlik renkli) + ORTA amblem kutusu (büyük ikon).
@@ -754,7 +829,7 @@ func _joker_drag_preview(jid: String) -> Control:
 	prev.modulate = Color(1, 1, 1, 0.9)
 	prev.rotation = deg_to_rad(-4)
 	prev.position = Vector2(-61, -75)  # imleci kartın ortasına hizala
-	prev.add_child(_joker_inner(joker, rarity))
+	prev.add_child(_joker_face(joker, rarity))
 	return prev
 
 # Sürükle-bırak ile joker yeniden sıralama. target_jid kartına bırakıldı; after=true ise
@@ -1174,16 +1249,23 @@ func _process(_delta: float) -> void:
 	_update_living_text(t)  # başlık/önemli yazılar sürekli hafif oynaşır (Balatro hissi)
 	_drive_seal_flame(chip_seal_panel)   # alev boyu = ÇİP değeri (canlı)
 	_drive_seal_flame(mult_seal_panel)   # alev boyu = ÇARPAN değeri
-	# Joker kartları sürekli hafif sallanır (yaşıyor hissi; rotasyon → pop-in scale'iyle çakışmaz)
+	# Joker kartları sürekli hafif SÜZÜLÜR (yaşıyor hissi) — düz sağa-sola "silecek" DEĞİL:
+	# yumuşak dikey float + çok az eğilme (farklı frekans + her kart farklı faz → organik).
 	if joker_box:
 		var jcards := joker_box.get_children()
 		for i in jcards.size():
 			var jc: Control = jcards[i]
 			if not jc.has_meta("jid"):
-				continue  # boş yuva sallanmaz
+				continue  # boş yuva süzülmez
 			if jc.size != Vector2.ZERO:
 				jc.pivot_offset = jc.size * 0.5
-			jc.rotation = sin(t * 1.5 + i * 0.85) * deg_to_rad(2.6)
+			var ph := i * 0.9
+			# dikey bob (additif → HBox'ın koyduğu konumu bozmaz): geçen karenin offset'ini geri al
+			var off := sin(t * 1.6 + ph) * 3.4
+			var prev: float = jc.get_meta("bob_off", 0.0)
+			jc.position.y += off - prev
+			jc.set_meta("bob_off", off)
+			jc.rotation = sin(t * 0.85 + ph * 1.3) * deg_to_rad(1.4)  # çok hafif eğilme (ayrı frekans)
 	if hand_area == null:
 		return
 	var tiles := hand_area.get_children()
@@ -1567,6 +1649,36 @@ func _is_current_valid() -> bool:
 			return false
 	return true
 
+# Kelime-tipi etiketi: dalgalı (Meksika dalgası) bbcode + yumuşak belirme/kaybolma.
+func _tier_bbcode(text: String) -> String:
+	return "[center][wave amp=6 freq=3.0 connected=1]%s[/wave][/center]" % text
+
+func _show_tier(text: String) -> void:
+	tier_label.text = _tier_bbcode(text)
+	if _tier_shown:
+		return  # zaten görünür → sadece metin güncellendi (her taş seçiminde yeniden fade etme)
+	_tier_shown = true
+	# güzel giriş: fade-in + aşağıdan hafif yaylanarak büyüyerek otur (dalga zaten harf harf akar)
+	tier_label.pivot_offset = tier_label.size * 0.5
+	tier_label.scale = Vector2(0.84, 0.84)
+	tier_label.modulate.a = 0.0
+	var tw := create_tween()
+	tw.tween_property(tier_label, "modulate:a", 1.0, 0.22).set_trans(Tween.TRANS_SINE)
+	tw.parallel().tween_property(tier_label, "scale", Vector2.ONE, 0.34) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+func _hide_tier() -> void:
+	if not _tier_shown:
+		tier_label.modulate.a = 0.0
+		return
+	_tier_shown = false
+	# güzel çıkış: fade-out + hafif küçülerek silinme
+	tier_label.pivot_offset = tier_label.size * 0.5
+	var tw := create_tween()
+	tw.tween_property(tier_label, "modulate:a", 0.0, 0.26).set_trans(Tween.TRANS_SINE)
+	tw.parallel().tween_property(tier_label, "scale", Vector2(0.9, 0.9), 0.26).set_trans(Tween.TRANS_SINE)
+	tw.tween_callback(func(): tier_label.text = _tier_bbcode("—"))
+
 # Kelime tahtası YOK → geçerlilik geri bildirimi OYNA butonunda (yeşil parlar + nabız) +
 # canlı çip/çarpan önizlemesi sol panelde. Seçili taşlar geçerlide yeşil ışıldar.
 func _update_word_display() -> void:
@@ -1578,7 +1690,7 @@ func _update_word_display() -> void:
 		var res := Scoring.score_word(state, cards, true)
 		chip_value.text = str(res["chips"])
 		mult_value.text = _fmt(res["mult"])
-		tier_label.text = "%s  ·  ×%s" % [res["tier"]["label"], _fmt(res["tier"]["mult"])]
+		_show_tier("%s  ·  ×%s" % [res["tier"]["label"], _fmt(res["tier"]["mult"])])
 		_set_play_ready(true)
 		_start_pulse()
 	else:
@@ -1586,9 +1698,9 @@ func _update_word_display() -> void:
 		mult_value.text = "1"
 		if cards.size() > 0:
 			var t := WordTiers.tier_for(cards.size())
-			tier_label.text = "%s  ·  ×%s" % [t["label"], _fmt(t["mult"])]
+			_show_tier("%s  ·  ×%s" % [t["label"], _fmt(t["mult"])])
 		else:
-			tier_label.text = "—"
+			_hide_tier()
 		_set_play_ready(false)
 		_stop_pulse()
 	_tint_selected_tiles()
@@ -1683,7 +1795,7 @@ func _on_play() -> void:
 		# Oynanan taşlar sağa süzülür + SADECE kullanılan kadar yeni taş desteden gelir (kalanlar durur)
 		_refresh_hud()  # sol panel/joker/sayaç güncelle (el'e dokunma — _refill_hand yapar)
 		await _refill_hand(fired, true)
-		await _countdown_seals(0.32)  # çip×çarpan geriye sayarak 0/1'e insin (anında değil)
+		# (çip×çarpan sıfırlaması artık _score_sequence sonunda — skor tur toplamına akar akmaz)
 		_update_word_display()
 
 func _on_discard() -> void:
@@ -1705,13 +1817,18 @@ func _set_buttons(on: bool) -> void:
 
 # ── JUICE: sıralı skor çözümü ──
 func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
-	chip_value.text = "0"
+	# ÖNİZLEME TABANINDAN DEVAM ET — OYNA'da 0×1'e düşmek YOK. Taban (harf çipleri + kademe +
+	# deterministik jokerler) zaten önizlemede gösteriliyor; SADECE önizlemeyi AŞAN ekstralar
+	# (rastgele jokerler vb.) tek tek üstüne eklenir. disp = ekranda gösterilen güncel değer.
 	_coin_idx = 0
 	_bam = 0
+	var disp_chip := int(chip_value.text) if chip_value.text.is_valid_int() else 0
+	var disp_mult := float(mult_value.text) if mult_value.text.is_valid_float() else float(res["tier"]["mult"])
+	chip_value.text = str(disp_chip)
+	mult_value.text = _fmt(disp_mult)
 	var li := 0
 	var run_chip := 0
-	var run_mult := float(res["tier"]["mult"])  # taban çarpan (kademe) — baştan görünür
-	mult_value.text = _fmt(run_mult)
+	var run_mult := float(res["tier"]["mult"])
 	for step in res["timeline"]:
 		match step["kind"]:
 			"letter":
@@ -1719,50 +1836,59 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 				if li < fired.size() and is_instance_valid(fired[li]):
 					tile = fired[li]
 				li += 1
-				# 1) Harfin TABAN çipi → taşın üstünde büyük "+N" + taş pop
 				var base := int(step["base"])
-				if base != 0:
-					run_chip += base
-					if tile != null:
-						_fire_tile(tile, base)
-					_count_label(chip_value, run_chip, 0.16)
-					_pop(chip_seal_panel, 1.1)
-					await get_tree().create_timer(0.26).timeout
-				# 2) Harf-üstü geliştirmeler (foil +50 / holo +10 / poly ×1.5) → tek tek pill
-				var anchor: Vector2
+				var anchor: Vector2 = _node_center(chip_seal_panel)
 				if tile != null:
 					anchor = _node_center(tile) + Vector2(0, -tile.size.y * 0.5 - 26.0)
-				else:
-					anchor = _node_center(chip_seal_panel)
+				# Taş "+N" baloncuğu + pop HER ZAMAN görünür (juice); kutu önizlemeden devam ettiği
+				# için saymaz (sıfıra düşmez). Sadece önizlemeyi AŞARSA kutu da yükselir.
+				if base != 0 and tile != null:
+					_fire_tile(tile, base)
+				run_chip += base
+				if run_chip > disp_chip:  # taban önizlemeyi aştı (nadir/rastgele harf-çipi) → kutu da
+					_count_label(chip_value, run_chip, 0.16)
+					_pop(chip_seal_panel, 1.1)
+					disp_chip = run_chip
+				# Harf-üstü geliştirmeler (foil/holo/poly): baloncuk HER ZAMAN; kutu yalnız aşınca
 				for op in step["ops"]:
 					run_chip = _op_chip(op, run_chip)
 					run_mult = _op_mult(op, run_mult)
-					_show_op(op, anchor, run_chip, run_mult)
+					var ex: bool = run_chip > disp_chip or run_mult > disp_mult
+					_show_op(op, anchor, run_chip, run_mult, ex)
+					if ex:
+						disp_chip = maxi(disp_chip, run_chip)
+						disp_mult = maxf(disp_mult, run_mult)
 					await get_tree().create_timer(0.3).timeout
-				# kademe değişimleri (drift olmasın diye) adım sonu uzlaştır
 				run_chip = int(step["chips"])
 				run_mult = float(step["mult"])
+				if base != 0 and tile != null:
+					await get_tree().create_timer(0.18).timeout  # taşlar arası tempo
 			"tier":
-				# Kelime uzunluğu kademesi taban çipi — sadece çip damgası akar/zıplar (yanına yazı YOK)
 				run_chip = int(step["chips"])
-				_count_label(chip_value, run_chip, 0.2)
-				_pop(chip_seal_panel, 1.12)
-				await get_tree().create_timer(0.34).timeout
+				if run_chip > disp_chip:
+					_count_label(chip_value, run_chip, 0.2)
+					_pop(chip_seal_panel, 1.12)
+					await get_tree().create_timer(0.32).timeout
+					disp_chip = run_chip
 			_:
-				# Joker/patron adımı — hangi joker, ne kattı? Her op tek tek "bam"lar.
+				# Joker/patron adımı — önizlemede OLMAYAN (rastgele) etki tek tek "bam"lar.
 				var jcard := _find_joker_card(String(step.get("id", "")))
-				var src_pos: Vector2
+				var src_pos := _node_center(mult_seal_panel) + Vector2(0, -52)
 				if jcard != null:
-					_juice_joker(jcard)  # squash/stretch zıplama (karakter)
-					_ember_burst(_node_center(jcard), 10, 2.6)
 					src_pos = _node_center(jcard) + Vector2(0, -jcard.size.y * 0.5 - 18.0)
-				else:
-					src_pos = _node_center(mult_seal_panel) + Vector2(0, -52)
+				var juiced := false
 				for op in step["ops"]:
 					run_chip = _op_chip(op, run_chip)
 					run_mult = _op_mult(op, run_mult)
-					_show_op(op, src_pos, run_chip, run_mult)
-					await get_tree().create_timer(0.34).timeout
+					if run_chip > disp_chip or run_mult > disp_mult:
+						if not juiced and jcard != null:
+							_juice_joker(jcard)  # squash/stretch zıplama (karakter)
+							_ember_burst(_node_center(jcard), 10, 2.6)
+							juiced = true
+						_show_op(op, src_pos, run_chip, run_mult)
+						await get_tree().create_timer(0.34).timeout
+						disp_chip = maxi(disp_chip, run_chip)
+						disp_mult = maxf(disp_mult, run_mult)
 				run_chip = int(step["chips"])
 				run_mult = float(step["mult"])
 	# Final: çip × çarpan patlaması
@@ -1783,21 +1909,29 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 	_pop(round_score_label, 1.45)
 	_flash_color(round_score_label, T.EMBER, 0.45)
 	_ember_burst(_node_center(round_score_label), 8, 2.6)
-	await get_tree().create_timer(0.5).timeout
+	# Skor tur toplamına AKTI → çip×çarpan kutuları O AN sıfırlansın (HER durumda; dükkana
+	# gidince de boş kalsın). Alev _drive_seal_flame ile değer düşünce yavaşça azalarak söner.
+	await get_tree().create_timer(0.18).timeout
+	await _countdown_seals(0.42)
+	_hide_tier()  # kelime-tipi etiketi de yumuşakça boşalsın (dükkana gidince "Orta ×2" kalmasın)
 
 # Tek bir katkıyı (op) GÖSTER: uçan pill + ilgili damga (çip/çarpan) pop + kıvılcım +
 # yükselen perdeli "bam" sesi + sayacı yeni değere akıt. run = op SONRASI değer.
-func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float) -> void:
+# set_box=false → baloncuk + pop/kıvılcım/ses gösterilir AMA kutu değeri değişmez (önizleme tabanı
+# zaten kutuda; baloncuk "juice" olarak görünür, kutu düşmez).
+func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float, set_box: bool = true) -> void:
 	var is_chip: bool = op.get("op", "") == "chip"
 	# Katkı, ETKİ ETTİĞİ yerde (harf/joker üstü) karo'lu büyük puan + "ÇARPAN/ÇİP" etiketiyle (Balatro tarzı).
 	_float_num(src_pos, _op_value(op), T.CHIP_BADGE if is_chip else T.MULT, "ÇİP" if is_chip else "ÇARPAN")
 	if is_chip:
-		_count_label(chip_value, run_chip, 0.14)
+		if set_box:
+			_count_label(chip_value, run_chip, 0.14)
 		_pop(chip_seal_panel, 1.2)
 		_ember_burst(_node_center(chip_seal_panel), 9, 2.4)
 		_add_trauma(TRAUMA_CHIP_OP)  # çip katkısı: ufak
 	else:
-		mult_value.text = _fmt(run_mult)
+		if set_box:
+			mult_value.text = _fmt(run_mult)
 		_pop(mult_seal_panel, 1.22)
 		_ember_burst(_node_center(mult_seal_panel), 11, 2.8)
 		_add_trauma(TRAUMA_MULT_OP)  # çarpan katkısı: orta kick
