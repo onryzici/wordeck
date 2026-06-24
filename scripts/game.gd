@@ -31,8 +31,14 @@ const TILE_H := 166
 const TILE_GAP := 14
 # Joker kartı boyutu — HER YERDE aynı (rail + dükkan satılık + dükkan satış). Taş yüksekliğiyle
 # aynı (166) ama daha GENİŞ (150) → ince durmaz, daha tok kart (oran ~0.90). Sanat bu orana kırpılı.
-const JOKER_W := 150
-const JOKER_H := 200  # 166→200: art kartları (880×1200 portre) şişmesin; yuva oranı görsele yaklaşsın
+# Joker kartı = art görselinin ORANINDA (880×1200 ≈ 0.733) → görsel kenardan kenara sığar; ne KIRPILIR
+# ne de yan/alt bara (boşluk) oluşur. Oran sabit: genişlik = yükseklik × 0.733.
+# 176×240 (kullanıcı: kartları biraz daha büyüt; oran 0.733 sabit → görsel kesilmez).
+const JOKER_W := 176
+const JOKER_H := 240
+# Dükkan paket/kupon kartı — joker ile aynı genişlik, biraz daha kısa (kullanıcı: paketler geniş+yüksek).
+const PACK_W := 176
+const PACK_H := 228
 const LIFT := 32
 const DECK_RESERVE := 140.0  # sağda deste yığını için ayrılan pay (el onun SOLUNA ortalanır)
 const MAX_JOKERS := 5
@@ -341,6 +347,7 @@ func _build_ui() -> void:
 	right.add_child(play_view)
 	shop_view = VBoxContainer.new()
 	shop_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	shop_view.alignment = BoxContainer.ALIGNMENT_END  # tezgahı ALTA hizala (kullanıcı)
 	shop_view.add_theme_constant_override("separation", 12)
 	shop_view.visible = false
 	right.add_child(shop_view)
@@ -739,37 +746,51 @@ const JOKER_ART := {
 	"intikam": "res://assets/images/jokers/intikam.png",                 # vampir koyun
 	"banker": "res://assets/images/jokers/banker.png",                   # centilmen koyun
 	"murekkep-lekesi": "res://assets/images/jokers/murekkep-lekesi.png", # venom/simbiyot
-	# mimar/esssiz/denge-bekcisi görselleri kullanıcı isteğiyle ŞİMDİLİK kaldırıldı (dosyalar duruyor).
+	# Yeni pixel-art "JOKER" kartları (2026-06-24):
+	"esssiz": "res://assets/images/jokers/esssiz.png",                   # unicorn koyun
+	"ilk-hamle": "res://assets/images/jokers/ilk-hamle.png",             # roket koyun
+	"ikizler": "res://assets/images/jokers/ikizler.png",                 # çift/yansıyan koyun
+	"sesli-avcisi": "res://assets/images/jokers/sesli-avcisi.png",       # avcı koyun
+	"kose-tasi": "res://assets/images/jokers/kose-tasi.png",             # köşe taşı koyun
+	# mimar/denge-bekcisi görselleri kullanıcı isteğiyle ŞİMDİLİK kaldırıldı (dosyalar duruyor).
 }
 # Pixel-art görseller (NEAREST filtre, keskin kalsın). İllüstrasyonlar bunda YOK → LINEAR (yumuşak ölçek).
 const JOKER_ART_PIXEL := {
 	"anagram-seytani": true,
 	"turkce-belasi": true, "patlamis-misir": true, "intikam": true, "banker": true, "murekkep-lekesi": true,
+	"esssiz": true, "ilk-hamle": true, "ikizler": true, "sesli-avcisi": true, "kose-tasi": true,
 }
 
-# Joker kart yüzü: özel görseli varsa tam-kart PNG (keskin pixel-art), yoksa stylebox+emoji düzeni.
+# Özel görseli olmayan jokerler için varsayılan/yedek "JOKER" kartı (klasik palyaço pixel-art).
+const JOKER_ART_FALLBACK := "res://assets/images/jokers/duz-joker.png"
+
+# Joker kart yüzü: özel görseli varsa o, yoksa varsayılan "JOKER" kartı (her ikisi de tam-kart PNG).
 func _joker_face(joker: Dictionary, rarity: Color) -> Control:
 	var jid := String(joker.get("id", ""))
-	if JOKER_ART.has(jid):
-		var tex := TextureRect.new()
-		tex.texture = _load_png(JOKER_ART[jid])
-		tex.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		tex.offset_left = 3; tex.offset_top = 3; tex.offset_right = -3; tex.offset_bottom = -3  # kenar içinde
-		tex.custom_minimum_size = Vector2(144, 160)
-		tex.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		tex.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tex.stretch_mode = TextureRect.STRETCH_SCALE  # anagram (pixel-art) kartı doldurur
-		# Pixel-art → NEAREST (keskin); illüstrasyon → LINEAR+mipmap (küçülürken yumuşak, jaggy yok).
-		tex.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST if JOKER_ART_PIXEL.has(jid) else CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		# Görselin köşeleri YUVARLANSIN (kare art → yuvarlak karta uysun)
-		var rm := ShaderMaterial.new()
-		rm.shader = load("res://shaders/card_round.gdshader")
-		rm.set_shader_parameter("radius_px", 20.0)
-		tex.material = rm
-		return tex
-	return _joker_inner(joker, rarity)
+	var has_custom := JOKER_ART.has(jid)
+	var art_path: String = JOKER_ART[jid] if has_custom else JOKER_ART_FALLBACK
+	# Fallback kart pixel-art; özelse haritadaki pixel bayrağına bak.
+	var is_pixel := (not has_custom) or JOKER_ART_PIXEL.has(jid)
+	var tex := TextureRect.new()
+	tex.texture = _load_png(art_path)
+	tex.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	tex.offset_left = 2; tex.offset_top = 2; tex.offset_right = -2; tex.offset_bottom = -2  # ince kenar payı
+	tex.custom_minimum_size = Vector2.ZERO
+	tex.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tex.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	# Kart oranı zaten art oranına eşit (0.733) → görselin TAMAMI sığar, KIRPILMAZ (ne sağ/sol ne üst/alt).
+	# KEEP_ASPECT_CENTERED: oran tutmayan az sayıdaki art (anagram vb.) için tam görünür, kırpmak yerine ortalar.
+	tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	# Pixel-art → NEAREST (keskin); illüstrasyon → LINEAR+mipmap (küçülürken yumuşak, jaggy yok).
+	tex.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST if is_pixel else CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Görselin köşeleri YUVARLANSIN (kare art → yuvarlak karta uysun)
+	var rm := ShaderMaterial.new()
+	rm.shader = load("res://shaders/card_round.gdshader")
+	rm.set_shader_parameter("radius_px", 20.0)
+	tex.material = rm
+	return tex
 
 # Nadirliğe (sınıfa) göre kart foil efekti (joker_foil shader). Her tier farklı kimlik:
 #  common    : hafif yavaş beyaz sheen
@@ -784,18 +805,39 @@ const JOKER_SHINE := {
 	"legendary": {"strength": 0.22, "speed": 0.60, "holo": 0.0, "rainbow": 0.0,  "sparkle": 0.4,  "edge_glow": 0.55},
 }
 
+# ÖZEL kartlar (nadir/efsanevi) için Balatro holografik foil şiddeti (yoksa basit sheen kalır).
+const BALATRO_FOIL := {
+	"rare":      {"intensity": 0.70, "speed": 0.9},
+	"legendary": {"intensity": 1.0,  "speed": 1.15},
+}
+
 # Kart üstüne nadirlik foil overlay'i (yoksa null). Art kartlarda da çalışır (üstte süzülür).
+# ÖZEL kartlar (nadir/efsanevi) → Balatro tarzı akışkan holografik foil; diğerleri → basit beyaz sheen.
 func _joker_shine(rarity_str: String, accent: Color) -> ColorRect:
-	if not Settings.particles_on or not JOKER_SHINE.has(rarity_str):
+	if not Settings.particles_on:
 		return null
-	var cfg: Dictionary = JOKER_SHINE[rarity_str]
 	var r := ColorRect.new()
 	r.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	r.offset_left = 3; r.offset_top = 3; r.offset_right = -3; r.offset_bottom = -3
 	r.color = Color.WHITE
-	r.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var m := ShaderMaterial.new()
+	if BALATRO_FOIL.has(rarity_str):
+		# ÖZEL kart → Balatro holografik foil (akışkan gökkuşağı + ışık bantları)
+		var bf: Dictionary = BALATRO_FOIL[rarity_str]
+		m.shader = load("res://shaders/balatro_foil.gdshader")
+		m.set_shader_parameter("intensity", float(bf["intensity"]))
+		m.set_shader_parameter("speed", float(bf["speed"]))
+		m.set_shader_parameter("radius_px", 18.0)
+		m.set_shader_parameter("rect_px", Vector2(JOKER_W - 6, JOKER_H - 6))
+		r.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR  # holografik yumuşak olsun
+		r.material = m
+		return r
+	if not JOKER_SHINE.has(rarity_str):
+		return null
+	# Sıradan/sıra dışı → basit beyaz sheen (pixel ızgaraya snap, oyun tarzı)
+	var cfg: Dictionary = JOKER_SHINE[rarity_str]
+	r.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	m.shader = load("res://shaders/joker_foil.gdshader")
 	m.set_shader_parameter("tint", accent.lerp(Color.WHITE, 0.5))  # nadirlik tonu + parlak gloss
 	m.set_shader_parameter("strength", float(cfg["strength"]))
@@ -3114,22 +3156,48 @@ func _rebuild_jokers() -> void:
 			else:
 				card = _make_joker_card(jokers[i])
 			joker_box.add_child(card)
-			if _animate_jokers:
+			if i == _buy_idx:
+				_celebrate_bought_joker(card)  # satın alınan joker: özel kutlama girişi
+				_buy_idx = -1
+			elif _animate_jokers:
 				_pop_in_joker(card, anim_i)
 				anim_i += 1
 		else:
-			joker_box.add_child(_make_joker_slot())
+			joker_box.add_child(_make_joker_slot())  # boş joker yuvası (oyun + dükkan: üst joker alanı her zaman görünür)
 	_animate_jokers = false
 
 # Joker kartı zıplayarak belirir (soket değil, canlı). HBox pozisyonu ezdiği için scale+alpha.
 func _pop_in_joker(card: Control, order: int) -> void:
-	card.pivot_offset = Vector2(61, 75)
+	card.pivot_offset = Vector2(JOKER_W, JOKER_H) * 0.5
 	card.modulate.a = 0.0
 	card.scale = Vector2(0.45, 0.45)
 	var delay := order * 0.06
 	var tw := create_tween().set_parallel(true)
 	tw.tween_property(card, "modulate:a", 1.0, 0.2).set_delay(delay)
 	tw.tween_property(card, "scale", Vector2.ONE, 0.34).set_delay(delay).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+# Dükkandan SATIN ALINAN joker YERİNDE belirir (yukarı/aşağı kayma YOK — kullanıcı o efekti sevmedi):
+# kısa parıltıyla yerinde pop + altın kıvılcım + ışık halkası + hafif sarsıntı + "satın alındı" çanı.
+func _celebrate_bought_joker(card: Control) -> void:
+	if not is_instance_valid(card):
+		return
+	await get_tree().process_frame  # layout otursun (pozisyon/boyut kesinleşsin)
+	if not is_instance_valid(card):
+		return
+	card.pivot_offset = card.size * 0.5
+	card.scale = Vector2(0.7, 0.7)
+	card.modulate = Color(1.8, 1.8, 1.8, 0.0)  # parlak flash + saydam (yerinde)
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(card, "scale", Vector2.ONE, 0.34).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(card, "modulate", Color.WHITE, 0.3)
+	_play_collect(_collect_big, 1.15)        # tatmin edici "satın alındı" çanı
+	await tw.finished
+	if not is_instance_valid(card):
+		return
+	var gc := card.global_position + card.size * 0.5
+	_ember_burst(gc, 24, 1.1, null, T.BRASS)    # altın kor patlaması (yerinde)
+	_flash_ring(gc, 1.4, T.BRASS)               # altın ışık halkası
+	_add_trauma(0.10)                           # hafif vuruş
 
 
 # ════════════════ 5e: DÜKKÂN / KAZAN / KAYBET ════════════════
@@ -3138,6 +3206,7 @@ var shop_view: VBoxContainer    # dükkân görünümü (tahta içinde, Balatro 
 var blind_view: VBoxContainer   # blind seçim görünümü (tahta içinde, Balatro)
 var _shop_mode := false         # dükkândayken üst jokerler tıkla→SAT olur
 var _animate_jokers := false    # bir sonraki _rebuild_jokers'ta kartlar zıplayarak gelsin
+var _buy_idx := -1              # bir sonraki _rebuild_jokers'ta bu indeksteki joker "satın alındı" kutlaması yapar
 var overlay: Control            # kazan/kaybet ekranı (tam ekran)
 var overlay_card: VBoxContainer
 var _overlay_dim: ColorRect     # arka karartma (game-over'da kırmızı tint)
@@ -3820,47 +3889,60 @@ func _build_shop_ui() -> void:
 	var shop = state["run"]["shop"]
 
 	# ── TEZGAH (tray) — felt'ten biraz açık, kalın koyu kenar, yuvarlak ──
+	# Raflara SARILIR (kompakt, boşluk yok); shop_view alt-hizalı → tezgah ALTA konumlanır (kullanıcı).
 	var tray := PanelContainer.new()
 	tray.add_theme_stylebox_override("panel", _shop_tray_sb())
-	tray.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tray.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	shop_view.add_child(tray)
-	var trow := HBoxContainer.new()
-	trow.add_theme_constant_override("separation", 16)
-	tray.add_child(trow)
 
-	# Sol kenar aksiyon butonları: SONRAKİ TUR (kırmızı) + YENİLE (yeşil)
-	var acol := VBoxContainer.new()
-	acol.add_theme_constant_override("separation", 12)
-	acol.custom_minimum_size = Vector2(146, 0)
-	var nb := _chunky_btn("SONRAKİ\nTUR  →", T.MULT, Color.WHITE)
-	nb.custom_minimum_size = Vector2(0, 96)
-	nb.pressed.connect(_on_next_blind)
-	acol.add_child(nb)
-	_shop_next_btn = nb  # öğretici turu için referans
-	var can_rr: bool = state["run"]["money"] >= shop["rerollCost"]
-	var rr := _chunky_btn(L.t("YENİLE\n$%d") % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
-	rr.custom_minimum_size = Vector2(0, 74)
-	rr.disabled = not can_rr
-	rr.pressed.connect(_on_reroll)
-	acol.add_child(rr)
-	trow.add_child(acol)
-
-	# Raflar
-	var shelves := VBoxContainer.new()
-	shelves.add_theme_constant_override("separation", 14)
-	shelves.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	shelves.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	trow.add_child(shelves)
-	_shop_shelves = shelves  # öğretici turu için referans
+	# Dikey iki sıra (Balatro): ÜST = [aksiyon butonları | jokerler], ALT = [paketler + kupon].
+	# Tray'i doldurur; jokerler üste, paketler alta yayılır (arada esnek boşluk) → tezgah sidebar boyunda.
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 16)
+	col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tray.add_child(col)
+	_shop_shelves = col  # öğretici turu için referans
 
 	var bc = state["run"]["boosterChoices"]
 	var ec = state["run"].get("enhancerChoices", null)
 	var pending = state["run"].get("pendingEnhancement", null)
 	if bc != null or ec != null or pending != null:
-		shelves.add_child(_build_shop_selection(bc, ec, pending))
-	else:
-		shelves.add_child(_build_shelf(_shop_joker_slots(shop)))   # RAF 1: jokerler
-		shelves.add_child(_build_shelf(_shop_pack_slots(shop)))    # RAF 2: kupon + paketler
+		col.add_child(_build_shop_selection(bc, ec, pending))
+		call_deferred("_position_shop_overlays")
+		return
+
+	# ÜST SIRA: sol aksiyon butonları + joker rafı.
+	# Butonlar joker rafı yüksekliğini DOLDURUR → iki buton üst üste ≈ bir joker kartı yüksekliği.
+	var toprow := HBoxContainer.new()
+	toprow.add_theme_constant_override("separation", 16)
+	toprow.size_flags_vertical = Control.SIZE_SHRINK_CENTER  # joker rafı yüksekliğine sarıl
+	col.add_child(toprow)
+
+	var acol := VBoxContainer.new()
+	acol.add_theme_constant_override("separation", 12)
+	acol.custom_minimum_size = Vector2(172, 0)  # daha geniş butonlar (kullanıcı)
+	acol.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	# İki buton üst üste ≈ bir joker kartı yüksekliği (kullanıcı isteği). Her biri (kart+recess)/2.
+	var btn_h := int((JOKER_H + 26 - 12) / 2.0)
+	var nb := _chunky_btn("SONRAKİ\nTUR  →", T.MULT, Color.WHITE)
+	nb.custom_minimum_size = Vector2(0, btn_h)  # büyük/tok buton
+	nb.pressed.connect(_on_next_blind)
+	acol.add_child(nb)
+	_shop_next_btn = nb  # öğretici turu için referans
+	var can_rr: bool = state["run"]["money"] >= shop["rerollCost"]
+	var rr := _chunky_btn(L.t("YENİLE\n$%d") % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
+	rr.custom_minimum_size = Vector2(0, btn_h)
+	rr.disabled = not can_rr
+	rr.pressed.connect(_on_reroll)
+	acol.add_child(rr)
+	toprow.add_child(acol)
+
+	var jshelf := _build_shelf(_shop_joker_slots(shop))  # RAF 1: jokerler
+	jshelf.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	toprow.add_child(jshelf)
+
+	# ALT SIRA: paketler + kupon (gerçek booster paketi görseli) — tray'in alt yarısını doldurur
+	col.add_child(_build_shelf(_shop_pack_slots(shop)))   # RAF 2
 
 	call_deferred("_position_shop_overlays")
 
@@ -3927,7 +4009,7 @@ func _shelf_recess() -> StyleBoxFlat:
 func _build_shelf(items: Array) -> Control:
 	var strip := PanelContainer.new()
 	strip.add_theme_stylebox_override("panel", _shelf_recess())
-	strip.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	strip.size_flags_vertical = Control.SIZE_SHRINK_CENTER  # içeriğe sarıl (kart etrafında boşluk yok)
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 14)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -3963,16 +4045,16 @@ func _shop_joker_slots(shop) -> Array:
 func _shop_pack_slots(shop) -> Array:
 	var out := []
 	var can_boost: bool = (not shop["booster"]["used"]) and state["run"]["money"] >= shop["booster"]["cost"]
-	out.append(_priced_slot(_pack_visual("HARF\nPAKETİ", "desteye +1 harf", T.GOOD),
-		150, 184, "$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
+	out.append(_priced_slot(_pack_visual("HARF\nPAKETİ", "desteye +1 harf", T.GOOD, "Aa"),
+		PACK_W, PACK_H, "$%d" % shop["booster"]["cost"], can_boost, _on_buy_booster, "3 harften 1'ini destene ekle"))
 	# KUPON — harf paketinin YANINDA (kullanıcı); sürükle-bırak/tıkla satın alma korunur.
 	if shop["voucher"] != null:
 		out.append(_voucher_card(shop["voucher"]))
 	var enh = shop.get("enhancer", null)
 	if enh != null:
 		var can_enh: bool = (not enh["used"]) and state["run"]["money"] >= enh["cost"]
-		out.append(_priced_slot(_pack_visual("CİLA\nPAKETİ", "foil / holo / poly…", T.CHIP),
-			150, 184, "$%d" % enh["cost"], can_enh, _on_buy_enhancer, "Bir harfine kalıcı geliştirme"))
+		out.append(_priced_slot(_pack_visual("CİLA\nPAKETİ", "foil / holo / poly…", T.CHIP, "✦"),
+			PACK_W, PACK_H, "$%d" % enh["cost"], can_enh, _on_buy_enhancer, "Bir harfine kalıcı geliştirme"))
 	return out
 
 # Item görseli + üstte poke-up altın FİYAT ETİKETİ + tıklama alanı. Balatro imzası.
@@ -4053,18 +4135,116 @@ func _joker_visual(j: Dictionary) -> Control:
 	return card
 
 # Paket görseli (foil torba hissi — renkli, parlak, krem yazı).
-func _pack_visual(title: String, sub: String, accent: Color) -> Control:
-	var card := PanelContainer.new()
-	card.add_theme_stylebox_override("panel", _item_sb(accent.lightened(0.15), accent.darkened(0.12)))
+func _pack_visual(title: String, sub: String, accent: Color, icon: String = "") -> Control:
+	# Gerçek booster PAKETİ hissi: folyo poşet gövde + shimmer + dişli sızdırmaz ağız + isim bandı.
+	var root := Control.new()
+	root.clip_contents = true
+
+	# 1) Gövde — folyo poşet (accent dolgu, kalın koyu kenar)
+	var body := Panel.new()
+	body.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	body.add_theme_stylebox_override("panel", _pack_body_sb(accent))
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(body)
+	# parlak foil shimmer (joker foil shader'ı yeniden kullan)
+	if Settings.particles_on:
+		var foil := ColorRect.new()
+		foil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		foil.offset_left = 3; foil.offset_top = 3; foil.offset_right = -3; foil.offset_bottom = -3
+		foil.color = Color.WHITE
+		foil.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		foil.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		var m := ShaderMaterial.new()
+		m.shader = load("res://shaders/joker_foil.gdshader")
+		m.set_shader_parameter("tint", accent.lerp(Color.WHITE, 0.55))
+		m.set_shader_parameter("strength", 0.13)
+		m.set_shader_parameter("speed", 0.40)
+		m.set_shader_parameter("holo", 0.0)
+		m.set_shader_parameter("rainbow", 0.0)
+		m.set_shader_parameter("sparkle", 0.0)
+		m.set_shader_parameter("edge_glow", 0.0)
+		m.set_shader_parameter("cells", 20.0)
+		foil.material = m
+		root.add_child(foil)
+
+	# 2) Üst CRIMP — folyo poşetin dişli sızdırmaz ağzı (açık şerit + delik sırası)
+	var crimp := Panel.new()
+	crimp.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	crimp.offset_left = 4; crimp.offset_right = -4; crimp.offset_top = 5; crimp.offset_bottom = 31
+	crimp.add_theme_stylebox_override("panel", _pack_crimp_sb(accent))
+	crimp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(crimp)
+	var holes := HBoxContainer.new()
+	holes.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	holes.alignment = BoxContainer.ALIGNMENT_CENTER
+	holes.add_theme_constant_override("separation", 8)
+	holes.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for i in 7:
+		var h := Panel.new()
+		var hs := StyleBoxFlat.new()
+		hs.bg_color = accent.darkened(0.55)
+		hs.set_corner_radius_all(3)
+		h.add_theme_stylebox_override("panel", hs)
+		h.custom_minimum_size = Vector2(5, 5)
+		h.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		holes.add_child(h)
+	crimp.add_child(holes)
+
+	# 3) İçerik — büyük soluk ikon + orta isim BANDI + alt açıklama
 	var vb := VBoxContainer.new()
+	vb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vb.offset_top = 30  # crimp'in altından başla
 	vb.alignment = BoxContainer.ALIGNMENT_CENTER
-	vb.add_theme_constant_override("separation", 8)
-	var t := _center(_label(title, 22, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 5))
-	t.custom_minimum_size = Vector2(132, 0)
-	vb.add_child(t)
-	vb.add_child(_center(_label(sub, 13, Color(1, 0.97, 0.88, 0.8))))
-	card.add_child(vb)
-	return card
+	vb.add_theme_constant_override("separation", 7)
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if icon != "":
+		vb.add_child(_center(_label(icon, 42, Color(1, 1, 1, 0.9), Color(0, 0, 0, 0.35), 3)))
+	var banner := PanelContainer.new()
+	banner.add_theme_stylebox_override("panel", _pack_banner_sb())
+	banner.size_flags_horizontal = Control.SIZE_SHRINK_CENTER  # bandı yatayda ortala (içeriğe sarıl)
+	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bl := _label(title, 17, Color(1, 0.97, 0.86), Color(0.05, 0.03, 0.01), 4)
+	bl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bl.custom_minimum_size = Vector2(118, 0)
+	banner.add_child(bl)
+	vb.add_child(banner)
+	vb.add_child(_center(_label(sub, 11, Color(1, 0.97, 0.88, 0.85))))
+	root.add_child(vb)
+	return root
+
+# Booster paketi gövde stylebox'u — folyo poşet (accent dolgu, kalın koyu kenar, gölge).
+func _pack_body_sb(accent: Color) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = accent.darkened(0.04)
+	s.set_corner_radius_all(12)
+	s.set_border_width_all(3)
+	s.border_color = accent.darkened(0.46)
+	s.shadow_color = Color(0, 0, 0, 0.5)
+	s.shadow_size = 6
+	s.shadow_offset = Vector2(0, 4)
+	return s
+
+# Paket sızdırmaz ağzı (crimp) stylebox'u — daha açık şerit, altta koyu çizgi.
+func _pack_crimp_sb(accent: Color) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = accent.lightened(0.22)
+	s.set_corner_radius_all(6)
+	s.border_width_bottom = 2
+	s.border_color = accent.darkened(0.4)
+	return s
+
+# Paket isim bandı stylebox'u — koyu yuvarlak şerit + altın kenar (banner).
+func _pack_banner_sb() -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.10, 0.07, 0.04, 0.92)
+	s.set_corner_radius_all(7)
+	s.set_border_width_all(2)
+	s.border_color = T.BRASS
+	s.content_margin_left = 9
+	s.content_margin_right = 9
+	s.content_margin_top = 4
+	s.content_margin_bottom = 5
+	return s
 
 # Kupon yuvası — içe gömük mor kuyu + (yanal) etiket + bilet kartı + fiyat etiketi.
 # KUPON kartı (Balatro üst "extra" satın alma spotu — mor bilet, SÜRÜKLE-BIRAK ile satın al).
@@ -4072,7 +4252,7 @@ func _pack_visual(title: String, sub: String, accent: Color) -> Control:
 func _voucher_card(v: Dictionary) -> Control:
 	var can_v: bool = state["run"]["money"] >= v["cost"]
 	var root := Control.new()
-	root.custom_minimum_size = Vector2(172, 188 + 16)
+	root.custom_minimum_size = Vector2(PACK_W, PACK_H + 16)  # diğer paketlerle aynı (geniş+yüksek)
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
 	root.tooltip_text = L.t(String(v["description"]))
 
@@ -4291,6 +4471,7 @@ func _after_shop_change() -> void:
 func _on_buy_joker(id: String) -> void:
 	if Shop.buy_joker(state, id).get("ok", false):
 		_play_card_move()
+		_buy_idx = state["run"]["jokers"].size() - 1  # yeni joker son sırada → kutlama girişi yapsın
 		_after_shop_change()
 
 func _on_sell_joker(id: String) -> void:
