@@ -11,6 +11,7 @@ const Shop = preload("res://engine/shop.gd")
 const Economy = preload("res://engine/economy.gd")
 const Enhancements = preload("res://data/enhancements.gd")
 const Settings = preload("res://scripts/settings.gd")
+const Records = preload("res://scripts/records.gd")
 const Bosses = preload("res://data/bosses.gd")
 const Blinds = preload("res://data/blinds.gd")
 const FlameBlock = preload("res://scripts/flame_block.gd")
@@ -34,6 +35,7 @@ const DECK_RESERVE := 140.0  # sağda deste yığını için ayrılan pay (el on
 const MAX_JOKERS := 5
 
 signal request_menu  # main.gd dinler → ana menüye dön (kazan/kaybet ekranından)
+signal music_state(state: String)  # main.gd dinler → oyun müziği durumu (normal/boss/shop)
 
 var state: Dictionary
 var selected_ids: Array = []
@@ -142,6 +144,54 @@ const TRAUMA_CHIP_OP := 0.09  # çip katkısı (foil vb.)
 const TRAUMA_MULT_OP := 0.34  # çarpan katkısı (joker/holo) — orta kick
 const TRAUMA_COLLIDE := 0.55  # çip×çarpan çarpışması
 
+# ════════════════ PUANLAMA JUICE — AYARLANABİLİR (sahnede/inspector'da oyna) ════════════════
+# Araştırma temelli (Balatro game-feel, Crosley analizi): spring overshoot easing
+# (cubic-bezier 0.34,1.56 ≈ TRANS_BACK/EASE_OUT), soldan-sağa ritmik tetikleme, yükselen
+# pitch merdiveni (C-D-E-F-G), skora göre KADEMELİ sarsıntı. Tüm sayılar editörde ayarlanır.
+@export_group("Puanlama Ritmi (sn)")
+@export var letter_step_delay := 0.22   # harfler arası bekleme — RİTMİN KALBİ (taş "+N"leri tek tek belirsin)
+@export var op_step_delay := 0.30       # harf-üstü geliştirme (foil/holo) katkıları arası
+@export var joker_step_delay := 0.34    # joker katkıları arası
+@export var tier_step_delay := 0.32     # kademe (el türü) çipi
+@export var final_pause := 0.32         # final çarpım öncesi dramatik duraklama
+@export_group("Taş Tetikleme")
+@export var tile_hop_height := 14.0     # tetiklenen taşın yukarı zıplaması (px)
+@export var tile_punch_scale := 1.25    # scale punch tepe değeri
+@export var tile_trigger_dur := 0.18    # hop+punch toplam süresi
+@export var tile_tilt_max := 4.0        # tetiklemede ufak rastgele eğim (±derece) — robotik durmasın
+@export_group("Kelime Havalanması")
+@export var word_lift_height := 18.0    # oynanan taşların toplu kalkışı (px)
+@export var word_lift_dur := 0.25
+@export var word_lift_scale := 1.06     # kalkışta hafif büyüme
+@export var word_dim_others := 0.5      # oynanmayan taşların kararması (alfa)
+@export_group("Yüzen Sayılar")
+@export var float_distance := 40.0      # +N yukarı süzülme mesafesi (px)
+@export var float_duration := 0.55
+@export var float_tilt_max := 6.0       # rastgele eğim (±derece)
+@export_group("Sayaç / Count-up")
+@export var count_tick_dur := 0.15      # sayaç tick süresi
+@export var score_countup_min := 0.55   # küçük skorda tur-skoru count-up süresi
+@export var score_countup_max := 1.1    # devasa skorda (uzar)
+@export_group("Ses Pitch Merdiveni")
+@export var pitch_base := 1.0
+@export var pitch_step_semitones := 1.0 # her harf tetiğinde yükseliş (yarım ses)
+@export var pitch_max_semitones := 14.0 # tavan (çok uzun kelimede tiz cızırtı olmasın)
+@export_group("Sarsıntı Kademeleri (skor eşiği)")
+@export var shake_tier1 := 1000         # < tier1 → küçük his
+@export var shake_tier2 := 10000        # tier1..tier2 → orta, üstü → büyük "ohh"
+@export var shake_amp_small := 0.26
+@export var shake_amp_med := 0.45
+@export var shake_amp_big := 0.72
+
+var _pitch_i := 0          # pitch merdiveni adımı (her puanlama dizisinde sıfırlanır)
+var _dimmed_tiles: Array = []  # havalanmada karartılan (oynanmayan) taşlar → dizinin sonunda geri alınır
+
+# Yükselen "blip" perdesi: müzikal yarım-ses merdiveni (tavanla sınırlı).
+func _ladder_pitch() -> float:
+	var st: float = minf(_pitch_i * pitch_step_semitones, pitch_max_semitones)
+	_pitch_i += 1
+	return pitch_base * pow(2.0, st / 12.0)
+
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	theme = T.make_theme(T.load_font())
@@ -153,6 +203,7 @@ func _ready() -> void:
 	_add_mat = CanvasItemMaterial.new()
 	_add_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
 	Settings.init()  # ses bus'ları + kalıcı ayarlar (idempotent; main de çağırır)
+	Records.init()   # kalıcı rekorlar (idempotent)
 	_sfx = AudioStreamPlayer.new()
 	_sfx.bus = "SFX"
 	add_child(_sfx)
@@ -909,6 +960,24 @@ func _make_joker_card(joker: Dictionary) -> Control:
 	p.mouse_exited.connect(_hide_joker_info)
 	p.add_child(_joker_face(joker, rarity))
 	var shine := _joker_shine(rstr, rarity)  # sınıfa (nadirlik) göre parıltı efekti
+	if shine != null:
+		p.add_child(shine)
+	return p
+
+# ── KOLEKSİYON vitrini (ana menü) ──
+# _make_joker_card ile AYNI görünüm (art/amblem + nadirlik foil + kenar) ama etkileşimsiz:
+# sürüklenmez, hover-popover yok. Menü ağacında render olacağı için oyun temasını taşır
+# (m6x11 pixel font + emblem yazıları doğru görünsün diye — bkz. _joker_info_card).
+func build_showcase_card(joker: Dictionary) -> Control:
+	var rarity: Color = T.RARITY.get(joker.get("rarity", "common"), T.CARD_EDGE)
+	var rstr := String(joker.get("rarity", "common"))
+	var p := PanelContainer.new()
+	p.theme = theme  # oyun teması (pixel font) — menü ağacında miras alınamaz, açıkça ver
+	p.add_theme_stylebox_override("panel", _joker_card_sb(rarity))
+	p.custom_minimum_size = Vector2(JOKER_W, JOKER_H)
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.add_child(_joker_face(joker, rarity))
+	var shine := _joker_shine(rstr, rarity)
 	if shine != null:
 		p.add_child(shine)
 	return p
@@ -1923,6 +1992,21 @@ func _flash(color: Color) -> void:
 	tw.tween_interval(0.22)
 	tw.tween_callback(_update_word_display)
 
+# Tam-ekran kısa parlama (çarpışma / büyük skor anı). Partikül ayarına saygı duyar.
+func _screen_flash(color: Color, peak: float, dur: float) -> void:
+	if not Settings.particles_on:
+		return
+	var f := ColorRect.new()
+	f.color = Color(color.r, color.g, color.b, 0.0)
+	f.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	f.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	f.z_index = 90  # içeriğin üstünde, overlay(100)/CRT(1001) altında
+	add_child(f)
+	var tw := create_tween()
+	tw.tween_property(f, "color:a", peak, dur * 0.32).set_trans(Tween.TRANS_SINE)
+	tw.tween_property(f, "color:a", 0.0, dur * 0.68).set_trans(Tween.TRANS_SINE)
+	tw.tween_callback(f.queue_free)
+
 # ── Aksiyonlar ──
 func _on_play() -> void:
 	if _busy:
@@ -1995,6 +2079,12 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 	# (rastgele jokerler vb.) tek tek üstüne eklenir. disp = ekranda gösterilen güncel değer.
 	_coin_idx = 0
 	_bam = 0
+	_pitch_i = 0  # pitch merdivenini sıfırla → her kelime taban perdeden tırmanır
+	# ADIM 1 — kelime havalanması (oynanan taşlar yukarı, diğerleri kararır) → sonra tetikleme
+	await _word_liftoff(fired)
+	# ÖNİZLEME TABANINDAN DEVAM ET — OYNA'da 0×1'e DÜŞMEZ (kullanıcı tercihi). Sayaç önizlemede
+	# zaten dolu; harf başına asıl ritim, taşların üstünde TEK TEK beliren "+N" baloncuklarıdır
+	# (_fire_tile → _float_gain_on_tile). Kutu yalnız önizlemeyi AŞARSA yükselir.
 	var disp_chip := int(chip_value.text) if chip_value.text.is_valid_int() else 0
 	var disp_mult := float(mult_value.text) if mult_value.text.is_valid_float() else float(res["tier"]["mult"])
 	chip_value.text = str(disp_chip)
@@ -2013,16 +2103,14 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 				var anchor: Vector2 = _node_center(chip_seal_panel)
 				if tile != null:
 					anchor = _node_center(tile) + Vector2(0, -tile.size.y * 0.5 - 26.0)
-				# Taş "+N" baloncuğu + pop HER ZAMAN görünür (juice); kutu önizlemeden devam ettiği
-				# için saymaz (sıfıra düşmez). Sadece önizlemeyi AŞARSA kutu da yükselir.
+				# Taş "+N" baloncuğu HER ZAMAN tek tek belirir (ritim burada); kutu önizlemeden devam eder.
 				if base != 0 and tile != null:
 					_fire_tile(tile, base)
 				run_chip += base
-				if run_chip > disp_chip:  # taban önizlemeyi aştı (nadir/rastgele harf-çipi) → kutu da
-					_count_label(chip_value, run_chip, 0.16)
+				if run_chip > disp_chip:  # taban önizlemeyi aştı → kutu da yükselir
+					_count_label(chip_value, run_chip, count_tick_dur)
 					_pop(chip_seal_panel, 1.1)
 					disp_chip = run_chip
-				# Harf-üstü geliştirmeler (foil/holo/poly): baloncuk HER ZAMAN; kutu yalnız aşınca
 				for op in step["ops"]:
 					run_chip = _op_chip(op, run_chip)
 					run_mult = _op_mult(op, run_mult)
@@ -2031,17 +2119,17 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 					if ex:
 						disp_chip = maxi(disp_chip, run_chip)
 						disp_mult = maxf(disp_mult, run_mult)
-					await get_tree().create_timer(0.3).timeout
+					await get_tree().create_timer(op_step_delay).timeout
 				run_chip = int(step["chips"])
 				run_mult = float(step["mult"])
 				if base != 0 and tile != null:
-					await get_tree().create_timer(0.18).timeout  # taşlar arası tempo
+					await get_tree().create_timer(letter_step_delay).timeout  # HARF ARASI ritmik bekleme
 			"tier":
 				run_chip = int(step["chips"])
 				if run_chip > disp_chip:
-					_count_label(chip_value, run_chip, 0.2)
+					_count_label(chip_value, run_chip, count_tick_dur)
 					_pop(chip_seal_panel, 1.12)
-					await get_tree().create_timer(0.32).timeout
+					await get_tree().create_timer(tier_step_delay).timeout
 					disp_chip = run_chip
 			_:
 				# Joker/patron adımı — önizlemede OLMAYAN (rastgele) etki tek tek "bam"lar.
@@ -2059,7 +2147,7 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 							_ember_burst(_node_center(jcard), 10, 2.6)
 							juiced = true
 						_show_op(op, src_pos, run_chip, run_mult)
-						await get_tree().create_timer(0.34).timeout
+						await get_tree().create_timer(joker_step_delay).timeout
 						disp_chip = maxi(disp_chip, run_chip)
 						disp_mult = maxf(disp_mult, run_mult)
 				run_chip = int(step["chips"])
@@ -2072,16 +2160,22 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 	# ÇİP ve ÇARPAN kutuları "×" işaretinde çarpışsın → ardından GEÇİCİ büyük SLAM (turuncu kutu kalktı)
 	await _collide_seals()
 	var mid := (_node_center(chip_seal_panel) + _node_center(mult_seal_panel)) * 0.5  # çarpışma noktası
-	_shake(min(11.0, 4.0 + res["score"] / 80.0), 0.38)
-	_slam_score(mid, int(res["score"]))  # vurucu geçici SLAM (font + partikül + halka içeride)
-	_play_collect(_collect_big, 1.0)  # final toplam çanı
+	var score := int(res["score"])
+	# ADIM 5 — büyüklüğe göre KADEMELİ tepki (Balatro: skor eşiğine göre sarsıntı/partikül/ses).
+	var tier := 0 if score < shake_tier1 else (1 if score < shake_tier2 else 2)
+	_add_trauma([shake_amp_small, shake_amp_med, shake_amp_big][tier])
+	_screen_flash(Color(1.0, 0.96, 0.86), [0.12, 0.22, 0.36][tier], 0.24)  # skorla kademeli flash
+	_slam_score(mid, score)  # vurucu geçici SLAM (font + partikül + halka içeride)
+	_play_collect(_collect_big, [1.0, 1.08, 1.18][tier])  # büyük skorda daha tiz "impact"
 	# (Kutlama yazısı KALDIRILDI — kullanıcı "kötü duruyor" dedi; _praise_banner artık çağrılmıyor)
-	await get_tree().create_timer(0.35).timeout
-	# TUR SKORU: skor "akarak" eklenir (count-up) + tok pop + kısa kor parlaması
-	_count_label(round_score_label, int(state["round"]["score"]), 0.5)
+	await get_tree().create_timer(final_pause).timeout
+	# TUR SKORU: skor "akarak" eklenir — süre skor BÜYÜKLÜĞÜYLE uzar (küçük hızlı, devasa dramatik)
+	var cu := lerpf(score_countup_min, score_countup_max, clampf(float(score) / float(shake_tier2), 0.0, 1.0))
+	_count_label(round_score_label, int(state["round"]["score"]), cu)
 	_pop(round_score_label, 1.45)
 	_flash_color(round_score_label, T.EMBER, 0.45)
-	_ember_burst(_node_center(round_score_label), 8, 2.6)
+	_ember_burst(_node_center(round_score_label), 8 + tier * 6, 2.6 + tier * 0.5)
+	_restore_dimmed()  # oynanmayan taşların parlaklığını geri al
 	# Skor tur toplamına AKTI → çip×çarpan kutuları O AN sıfırlansın (HER durumda; dükkana
 	# gidince de boş kalsın). Alev _drive_seal_flame ile değer düşünce yavaşça azalarak söner.
 	await get_tree().create_timer(0.18).timeout
@@ -2098,7 +2192,7 @@ func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float, 
 	_float_num(src_pos, _op_value(op), T.CHIP_BADGE if is_chip else T.MULT, "ÇİP" if is_chip else "ÇARPAN")
 	if is_chip:
 		if set_box:
-			_count_label(chip_value, run_chip, 0.14)
+			_count_label(chip_value, run_chip, count_tick_dur)
 		_pop(chip_seal_panel, 1.2)
 		_ember_burst(_node_center(chip_seal_panel), 9, 2.4)
 		_add_trauma(TRAUMA_CHIP_OP)  # çip katkısı: ufak
@@ -2131,18 +2225,76 @@ func _bam_sound() -> void:
 		_ui_sfx.play()
 	_bam += 1
 
+# Final skor count-up'ına eşlik eden YÜKSELEN perdeli "ramp" sesi (prosedürel ton; gerilim
+# boşalır). Süre count-up ile eşlenir; düşük decay → ramp boyunca sürer. _make_tone_wav kullanır.
+func _play_score_ramp(dur: float) -> void:
+	if _sfx == null:
+		return
+	var freqs := []
+	var steps := 18
+	for i in steps:
+		freqs.append(330.0 + 980.0 * (float(i) / float(steps - 1)))  # 330→1310 Hz, yükselen
+	_sfx.stream = _make_tone_wav(freqs, maxf(0.18, dur), 0.5, 0.20)
+	_sfx.pitch_scale = 1.0
+	_sfx.play()
+
+# Adım 1 — KELİME HAVALANMASI: oynanan taşlar puanlama için TOPLU yukarı kalkar (spring
+# overshoot, anticipation); oynanmayan el taşları hafifçe kararır → odak oynanan kelimede.
+# Tetikleme sırası boyunca kelime kalkık kalır (Balatro: oynanan el yukarıda puanlanır).
+func _word_liftoff(fired: Array) -> void:
+	_dimmed_tiles.clear()
+	var played := {}
+	for t in fired:
+		if is_instance_valid(t):
+			played[t] = true
+	for id in tile_by_id:
+		var t: Control = tile_by_id[id]
+		if is_instance_valid(t) and not played.has(t):
+			_dimmed_tiles.append(t)
+			create_tween().tween_property(t, "modulate:a", word_dim_others, word_lift_dur).set_trans(Tween.TRANS_SINE)
+	for t in fired:
+		if not is_instance_valid(t):
+			continue
+		t.pivot_offset = t.size / 2.0
+		var lt := create_tween()
+		lt.tween_property(t, "position:y", t.position.y - word_lift_height, word_lift_dur).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		lt.parallel().tween_property(t, "scale", Vector2(word_lift_scale, word_lift_scale), word_lift_dur).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	if not fired.is_empty():
+		await get_tree().create_timer(word_lift_dur).timeout
+
+# Havalanmada karartılan (oynanmayan) taşların parlaklığını geri al.
+func _restore_dimmed() -> void:
+	for t in _dimmed_tiles:
+		if is_instance_valid(t):
+			create_tween().tween_property(t, "modulate:a", 1.0, 0.2)
+	_dimmed_tiles.clear()
+
 func _fire_tile(tile: Control, gain: int) -> void:
+	# Spring overshoot ile HOP (yukarı zıpla) + scale punch + ufak rastgele eğim (organik his).
+	tile.pivot_offset = tile.size / 2.0
+	tile.z_index = 20  # tetiklenen taş diğerlerinin ÖNÜNE çıksın (Balatro: aktif kart üstte)
+	var y0 := tile.position.y
+	var up := tile_trigger_dur * 0.42
+	var down := maxf(0.04, tile_trigger_dur - up)
+	var tilt := deg_to_rad(randf_range(-tile_tilt_max, tile_tilt_max))
 	var tw := create_tween()
-	tw.tween_property(tile, "scale", Vector2(1.22, 1.22), 0.08).set_trans(Tween.TRANS_BACK)
-	tw.tween_property(tile, "scale", Vector2.ONE, 0.12)
+	# YUKARI: punch + hop + eğim (paralel)
+	tw.tween_property(tile, "scale", Vector2(tile_punch_scale, tile_punch_scale), up).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(tile, "position:y", y0 - tile_hop_height, up).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(tile, "rotation", tilt, up).set_trans(Tween.TRANS_SINE)
+	# AŞAĞI: yaylanarak otur (paralel)
+	tw.tween_property(tile, "scale", Vector2.ONE, down).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(tile, "position:y", y0, down).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(tile, "rotation", 0.0, down).set_trans(Tween.TRANS_SINE)
+	tw.chain().tween_callback(func(): if is_instance_valid(tile): tile.z_index = 0)
 	_ember_burst(_node_center(tile), 12, 3.0)
 	# Geliştirilmiş taş (foil/holo/cam…) → ekstra RENKLİ kıvılcım (özel his)
 	if tile.has_meta("enh_color"):
 		_ember_burst(_node_center(tile), 14, 3.2, null, tile.get_meta("enh_color"))
 	_add_trauma(TRAUMA_TILE)  # her taşta küçük his
-	if _ui_sfx and _blink:           # harf "blink" sesi (kullanıcı ekledi) — her puan gelişinde
+	if _ui_sfx and _blink:           # harf "blink" sesi — YÜKSELEN perde (combo merdiveni)
 		_ui_sfx.stream = _blink
-		_ui_sfx.pitch_scale = 1.0   # op zinciri perdeyi yükseltmiş olabilir → taban perdeye dön
+		_ui_sfx.pitch_scale = _ladder_pitch()  # C-D-E-F-G… combo yükseliyor hissi
 		_ui_sfx.play()
 	if gain > 0:
 		_float_gain_on_tile(tile, gain)  # +N taşın TEPESİNDE belirir (sola uçmaz)
@@ -2152,16 +2304,17 @@ func _float_gain_on_tile(tile: Control, gain: int) -> void:
 	if not is_instance_valid(tile):
 		return
 	var top := _node_center(tile) + Vector2(0.0, -tile.size.y * 0.5 - 16.0)
-	_float_num(top, "+%d" % gain, T.CHIP_BADGE)
+	_float_num(top, "+%d" % gain, T.CHIP_BADGE, "", 0.04)  # SNAPPY: +N taş zıplayınca anında çıksın (ritim)
 
 # Verilen KONUMDA karo'lu büyük puan ("+50" / "×1.5" / "+10"). color = karo rengi
 # (çip → mavi, çarpan → kırmızı). Radiuslu pill DEĞİL — keskin karo + kalın puan.
-func _float_num(top: Vector2, text: String, color: Color, label: String = "") -> void:
+func _float_num(top: Vector2, text: String, color: Color, label: String = "", num_delay: float = 0.2) -> void:
 	var holder := Control.new()
 	holder.z_index = 46
 	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(holder)
 	holder.position = top
+	holder.rotation = deg_to_rad(randf_range(-float_tilt_max, float_tilt_max))  # organik eğim (robotik durmasın)
 	# KARO — büyük, ORTALI, DÜŞÜK opacity (pixel). ÖNCE gelir; puan ÜSTÜNE biner.
 	var dia := Panel.new()
 	var dsb := StyleBoxFlat.new()
@@ -2206,17 +2359,17 @@ func _float_num(top: Vector2, text: String, color: Color, label: String = "") ->
 	dt.tween_property(dia, "modulate:a", 1.0, 0.14)
 	dt.tween_property(dia, "scale", Vector2(1.12, 1.12), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	dt.chain().tween_property(dia, "scale", Vector2.ONE, 0.14).set_trans(Tween.TRANS_SINE)
-	# 2) SONRA puan: karonun üstünde belir
+	# 2) SONRA puan: karonun üstünde belir (num_delay küçükse "snappy" = anında pop)
 	var lt := create_tween()
-	lt.tween_interval(0.2)
+	lt.tween_interval(num_delay)
 	lt.tween_property(lbl, "modulate:a", 1.0, 0.14)
 	if slbl != null:
 		lt.parallel().tween_property(slbl, "modulate:a", 1.0, 0.14)
 	# 3) Birlikte yavaşça yüksel + sön
 	var rt := create_tween()
-	rt.tween_interval(0.55)
-	rt.tween_property(holder, "position:y", top.y - 28.0, 0.55).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	rt.parallel().tween_property(holder, "modulate:a", 0.0, 0.4).set_delay(0.12)
+	rt.tween_interval(0.2)
+	rt.tween_property(holder, "position:y", top.y - float_distance, float_duration).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	rt.parallel().tween_property(holder, "modulate:a", 0.0, float_duration * 0.72).set_delay(float_duration * 0.22)
 	rt.tween_callback(holder.queue_free)
 
 func _bezier(p0: Vector2, p1: Vector2, p2: Vector2, t: float) -> Vector2:
@@ -2424,9 +2577,10 @@ func _collide_seals() -> void:
 	tw.tween_property(g_chip, "scale", Vector2(1.18, 1.18), dur)
 	tw.tween_property(g_mult, "scale", Vector2(1.18, 1.18), dur)
 	await tw.finished
-	# 2) ÇARPIŞMA: kor + halka + orta trauma
+	# 2) ÇARPIŞMA: kor + halka + EKRAN FLASH'I + orta trauma
 	_ember_burst(meet, 24, 3.6)
 	_flash_ring(meet, 7.0, Color(T.EMBER.r, T.EMBER.g, T.EMBER.b, 0.85))
+	_screen_flash(Color(1.0, 0.95, 0.85), 0.2, 0.18)  # sıcak beyaz kısa flash
 	_add_trauma(TRAUMA_COLLIDE)
 	# 3) Hayaletler bir an punch yapıp sönsün
 	var pt := create_tween()
@@ -2500,7 +2654,10 @@ func _slam_score(center: Vector2, score: int) -> void:
 	tw.tween_property(lbl, "scale", Vector2(0.9, 0.9), 0.12).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	tw.parallel().tween_property(lbl, "modulate", Color.WHITE, 0.18)
 	tw.tween_property(lbl, "scale", Vector2.ONE, 0.10)
-	_count_label(lbl, score, 0.28)
+	# Final skor count-up + YÜKSELEN perdeli ramp sesi (süre skorla uzar → büyük skor dramatik)
+	var cud := lerpf(0.3, 0.85, clampf(float(score) / float(shake_tier2), 0.0, 1.0))
+	_play_score_ramp(cud)
+	_count_label(lbl, score, cud)
 
 	var life := create_tween()  # kısa bekle → yüksel + sön → temizle
 	life.tween_interval(0.7)
@@ -3340,6 +3497,7 @@ func _go_to_shop() -> void:
 
 # ── BLIND SEÇİM EKRANI (Balatro "Choose your next Blind") — TAHTA-İÇİ uzun kolonlar ──
 func _open_blind_select() -> void:
+	music_state.emit("normal")  # dükkandan çık → normal müzik (boss seçilirse turda boss'a geçer)
 	_shop_mode = false
 	play_view.visible = false
 	shop_view.visible = false
@@ -3541,6 +3699,9 @@ func _on_blind_select() -> void:
 	play_view.visible = true
 	if deck_holder:
 		deck_holder.visible = true
+	# Tur başlıyor → boss ise gerilim müziği, değilse normal (dosya yoksa normalde kalır).
+	var bt := String(state["round"]["blind"].get("type", "small"))
+	music_state.emit("boss" if bt == "boss" else "normal")
 	_reset_flames()
 	if _tut_active:
 		_tut_event("blind_selected")
@@ -3562,6 +3723,7 @@ func _on_blind_skip() -> void:
 
 # ── DÜKKÂN (tahta-içi, Balatro tarzı: sol panel+joker rafı kalır, orta alan değişir) ──
 func _open_shop() -> void:
+	music_state.emit("shop")  # dükkan müziği (dosya yoksa normalde kalır)
 	_shop_reward = Round.collect_blind_reward(state)  # ödülü topla (bir kez, idempotent)
 	_shop_msg = ""
 	Shop.generate_shop(state)
@@ -4593,29 +4755,32 @@ func _open_lose() -> void:
 func _add_run_stats() -> void:
 	var run: Dictionary = state["run"]
 	var stats: Dictionary = run.get("stats", {})
+	var won: bool = run["status"] == "won"
+	# Kalıcı rekorlara işle; KIRILAN rekorların anahtarlarını al (uç ekranda vurgu için).
+	var fresh: Dictionary = Records.submit(stats, int(run["ante"]), won)
 	var defeated := String(state["round"]["blind"]["name"]) if run["status"] == "lost" else "—"
 	var best := "%s · %d" % [stats.get("bestWord", "—"), stats.get("bestScore", 0)]
 	if String(stats.get("bestWord", "")) == "":
 		best = "—"
-	# {etiket, değer, renk}
+	# {etiket, değer, renk, rekor_mu}
 	var cells := [
-		["En İyi El", best, T.BRASS],
-		["Yenilen", defeated.to_upper(), T.MULT],
-		["Oynanan Kelime", str(stats.get("words", 0)), T.CHIP_BADGE],
-		["Atılan Harf", str(stats.get("discards", 0)), T.CHIP_BADGE],
-		["Satın Alınan", str(stats.get("bought", 0)), T.GOOD],
-		["Reroll", str(stats.get("rerolls", 0)), T.GOOD],
-		["Bölüm", "%d / %d" % [run["ante"], state["config"]["maxAnte"]], T.ORANGE],
-		["Tur", str(run["blindIndex"] + 1), T.ORANGE],
-		["Kalan Para", "$%d" % run["money"], T.BRASS],
-		["Toplam Joker", str(run["jokers"].size()), T.LILAC],
+		["En İyi El", best, T.BRASS, fresh.has("best_score")],
+		["Yenilen", defeated.to_upper(), T.MULT, false],
+		["Oynanan Kelime", str(stats.get("words", 0)), T.CHIP_BADGE, false],
+		["Atılan Harf", str(stats.get("discards", 0)), T.CHIP_BADGE, false],
+		["Satın Alınan", str(stats.get("bought", 0)), T.GOOD, false],
+		["Reroll", str(stats.get("rerolls", 0)), T.GOOD, false],
+		["Bölüm", "%d / %d" % [run["ante"], state["config"]["maxAnte"]], T.ORANGE, fresh.has("furthest_ante")],
+		["Tur", str(run["blindIndex"] + 1), T.ORANGE, false],
+		["Kalan Para", "$%d" % run["money"], T.BRASS, false],
+		["Toplam Joker", str(run["jokers"].size()), T.LILAC, false],
 	]
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 12)
 	grid.add_theme_constant_override("v_separation", 8)
 	for cell in cells:
-		grid.add_child(_stat_cell(cell[0], cell[1], cell[2]))
+		grid.add_child(_stat_cell(cell[0], cell[1], cell[2], cell[3]))
 	overlay_card.add_child(grid)
 	# Seed (uzun olabilir) — ızgaranın altında tam genişlik, küçük, sığar.
 	var seed_lbl := _center(_label("Seed: %s" % String(run["seed"]), 13, T.TEXT_DIM))
@@ -4624,12 +4789,21 @@ func _add_run_stats() -> void:
 	overlay_card.add_child(seed_lbl)
 
 # Tek istatistik kutusu: koyu inset + üstte etiket + altta renkli değer.
-func _stat_cell(caption: String, value: String, color: Color) -> Control:
+func _stat_cell(caption: String, value: String, color: Color, is_record: bool = false) -> Control:
 	var p := PanelContainer.new()
-	p.add_theme_stylebox_override("panel", T.stat_inset())
+	var sb := T.stat_inset()
+	if is_record:  # yeni rekor → altın kenarlık (kutu öne çıksın)
+		sb.set_border_width_all(2)
+		sb.border_color = T.BRASS
+	p.add_theme_stylebox_override("panel", sb)
 	p.custom_minimum_size = Vector2(228, 0)
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 1)
+	if is_record:  # "YENİ REKOR!" altın rozet — kutunun en üstünde
+		var rec := _label("★ YENİ REKOR ★", 12, T.BRASS, T.OUTLINE, 2)
+		rec.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		rec.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		v.add_child(rec)
 	var cap := _label(caption.to_upper(), 14, T.TEXT_DIM)
 	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	cap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -4639,6 +4813,11 @@ func _stat_cell(caption: String, value: String, color: Color) -> Control:
 	v.add_child(cap)
 	v.add_child(val)
 	p.add_child(v)
+	if is_record:  # hafif altın nabız → göz çeksin (partikül ayarından bağımsız, sade)
+		p.pivot_offset = p.custom_minimum_size * 0.5
+		var tw := create_tween().set_loops()
+		tw.tween_property(p, "modulate", Color(1.18, 1.12, 0.8), 0.6).set_trans(Tween.TRANS_SINE)
+		tw.tween_property(p, "modulate", Color.WHITE, 0.6).set_trans(Tween.TRANS_SINE)
 	return p
 
 func _add_end_buttons(won: bool) -> void:

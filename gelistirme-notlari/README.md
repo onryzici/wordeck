@@ -22,6 +22,7 @@ nasıl test edilir" diye bakabilmen.
 | 2026-06-23 | [09 — İlk-giriş öğreticisi + King](2026-06-23-09-ogretici-king.md) | Etkileşimli öğretici (bağlamsal balon + spotlight cutout, dükkan turu, sıra düzeltildi); king.png yuvarlatıldı |
 | 2026-06-23 | [10 — Skor alanı + puanlama + alev + joker art](2026-06-23-10-skor-alani-puanlama-alev-joker-art.md) | Çip×çarpan kendi kutusunda + beyaz dalgalı başlık; puanlama önizlemeden devam eder (0×1'e düşmez) + taş baloncukları; skor akınca sıfırlanır; alev daha yüksek/yavaş söner; joker kart PNG + köşe yuvarlama + sınıf parıltısı + süzülme |
 | 2026-06-23 | [11 — GLYPHIX logosu + CRT (4K)](2026-06-23-11-glyphix-logo-crt.md) | Oyun WORDECK→GLYPHIX; ana menü harf taşları yerine logo PNG (bükeylik + nefes + motion blur + matlık + yumuşak gölge); CRT tarama çizgileri çözünürlük-bağımsız (4K'da görünür) |
+| 2026-06-24 | [12 — Koleksiyon + Rekor + Müzik + Puanlama cilası](2026-06-24-12-koleksiyon-rekor-muzik-puanlama-cilasi.md) | Joker galerisi (alt çubuk); kalıcı rekor (run-sonu altın vurgu + REKORLAR ekranı); durum tabanlı cross-fade müzik (boss/dükkan MP3, ham bayt yükleme); Balatro-grade puanlama (havalanma, taş hop, yükselen pitch, "+N" snappy ritim, count-up ramp sesi, ekran flash, kademeli sarsıntı) |
 
 ## Referanslar
 - [jokerler-referans.md](jokerler-referans.md) — 62 jokerin tam etkisi + kart tasarımı için sınıflandırma

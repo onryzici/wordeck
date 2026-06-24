@@ -10,6 +10,8 @@ extends Control
 
 const T = preload("res://scripts/theme.gd")
 const Settings = preload("res://scripts/settings.gd")
+const Jokers = preload("res://data/jokers.gd")
+const Records = preload("res://scripts/records.gd")
 
 const RULES_TEXT := "Elindeki harf taşlarından geçerli bir TÜRKÇE kelime kur, OYNA'ya bas.\n\nSkor = ÇİP × ÇARPAN. Uzun kelimeler ve jokerler skoru patlatır.\n\nHer turun bir HEDEF puanı var; tutturursan geçersin. Sınırlı kelime HAKKIN ve harf DEĞİŞİM hakkın var — değiştirmek hak harcamaz.\n\nKullanmadığın harfler elinde kalır; deste 8'e tamamlanır. Asıl strateji: şimdi mi oynasam, yoksa harf tutup daha büyük kombo mu kursam?"
 
@@ -20,16 +22,25 @@ var menu_root: Control
 var menu_bg: ColorRect
 var help_overlay: Control
 var music: AudioStreamPlayer        # menü müziği
-var game_music: AudioStreamPlayer   # oyun-içi 8-bit müzik
+# Oyun-içi müzik = DURUM tabanlı cross-fade (normal / boss / dükkan). İki player arasında
+# yumuşak geçiş; bir durumun dosyası yoksa "normal"e düşer → bugün tek parçayla da çalışır,
+# boss/dükkan dosyaları eklenince otomatik devreye girer. (Onur ayrı parça ekleyecek.)
+var _gm_players: Array[AudioStreamPlayer] = []  # [a, b] cross-fade çifti
+var _gm_active := 0                  # şu an çalan player indeksi
+var _gm_state := ""                  # aktif müzik durumu (normal/boss/shop)
+var _gm_path := ""                   # aktif çalan dosya yolu (gereksiz restart'ı önler)
 var fade: ColorRect            # girdap geçiş katmanı (menü ↔ oyun)
 var _fade_mat: ShaderMaterial  # vortex_transition shader materyali
 var hero: Control              # merkez yelpaze taşları (hafif sallanır)
 
 var settings_overlay: Control
+var collection_overlay: Control
+var records_overlay: Control
 
 func _ready() -> void:
 	randomize()
 	Settings.init()  # ses bus'ları + kalıcı ayarları yükle/uygula
+	Records.init()   # kalıcı rekorlar (ana menü rozeti)
 	get_viewport().size_changed.connect(_update_aspect)
 	_build_menu()
 	_build_fade()   # girdap geçişi ÖNCE eklenir → CRT'nin ALTINDA kalır
@@ -45,6 +56,7 @@ func _ready() -> void:
 	background.visible = false  # başlangıçta menü açık → oyun girdabı render olmasın
 	menu_root.visible = true
 	game.request_menu.connect(_on_request_menu)  # kazan/kaybet → ana menü
+	game.music_state.connect(_on_music_state)    # boss/dükkan/normal → müzik geçişi
 
 	var args := OS.get_cmdline_user_args()
 	var capturing := args.has("--capture")
@@ -141,6 +153,12 @@ func _build_menu() -> void:
 	var set_btn := _bar_button("AYARLAR", T.BRASS, T.INK)
 	set_btn.pressed.connect(_on_settings_pressed)
 	bar.add_child(set_btn)
+	var coll_btn := _bar_button("KOLEKSİYON", T.LILAC, Color.WHITE)
+	coll_btn.pressed.connect(_on_collection_pressed)
+	bar.add_child(coll_btn)
+	var rec_btn := _bar_button("REKORLAR", T.EMBER, T.INK)
+	rec_btn.pressed.connect(_on_records_pressed)
+	bar.add_child(rec_btn)
 	var help_btn := _bar_button("NASIL OYNANIR", T.GOOD, T.INK)
 	help_btn.pressed.connect(_on_help_pressed)
 	bar.add_child(help_btn)
@@ -187,6 +205,83 @@ func _menu_label(text: String, size: int, color: Color) -> Label:
 	l.add_theme_color_override("font_outline_color", T.OUTLINE)
 	l.add_theme_constant_override("outline_size", 4)
 	return l
+
+# ── REKORLAR ekranı (alt çubuk butonu) ──
+func _on_records_pressed() -> void:
+	_build_records()
+	records_overlay.visible = true
+
+func _build_records() -> void:
+	if records_overlay and is_instance_valid(records_overlay):
+		records_overlay.queue_free()
+	records_overlay = Control.new()
+	records_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	menu_root.add_child(records_overlay)
+
+	var dim := ColorRect.new()
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color(0, 0, 0, 0.6)
+	records_overlay.add_child(dim)
+
+	var cc := CenterContainer.new()
+	cc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	records_overlay.add_child(cc)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", T.felt_panel(T.SIDEBAR, T.BRASS, 18))
+	cc.add_child(panel)
+
+	var pad := MarginContainer.new()
+	for m in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
+		pad.add_theme_constant_override(m, 24)
+	panel.add_child(pad)
+
+	var vb := VBoxContainer.new()
+	vb.custom_minimum_size = Vector2(520, 0)
+	vb.add_theme_constant_override("separation", 14)
+	pad.add_child(vb)
+
+	vb.add_child(_menu_label("🏆 REKORLAR", 40, T.EMBER))
+
+	if Records.best_score <= 0:
+		var none := _menu_label("Henüz rekor yok.\nBir run tamamla, burada belirsin!", 22, T.TEXT_DIM)
+		vb.add_child(none)
+	else:
+		var best_val := "%d" % Records.best_score
+		if Records.best_word != "":
+			best_val += "  (%s)" % Records.best_word
+		for row in [
+				["En İyi El", best_val, T.BRASS],
+				["En İleri Bölüm", "%d / 8" % Records.furthest_ante, T.ORANGE],
+				["Galibiyet", "%d" % Records.wins, T.GOOD],
+				["Oynanan Run", "%d" % Records.runs, T.CHIP_BADGE]]:
+			vb.add_child(_record_row(row[0], row[1], row[2]))
+
+	var close := _bar_button("KAPAT", T.BRASS, T.INK)
+	close.pressed.connect(func(): if records_overlay: records_overlay.visible = false)
+	vb.add_child(close)
+
+# Rekor satırı: koyu inset, solda etiket + sağda renkli değer.
+func _record_row(caption: String, value: String, color: Color) -> Control:
+	var p := PanelContainer.new()
+	var sb := T.felt_panel(T.FELT_800, T.LINE, 10)
+	p.add_theme_stylebox_override("panel", sb)
+	var pad := MarginContainer.new()
+	pad.add_theme_constant_override("margin_left", 14)
+	pad.add_theme_constant_override("margin_right", 14)
+	pad.add_theme_constant_override("margin_top", 8)
+	pad.add_theme_constant_override("margin_bottom", 8)
+	p.add_child(pad)
+	var h := HBoxContainer.new()
+	pad.add_child(h)
+	var cap := _menu_label(caption, 22, T.TEXT_DIM)
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	cap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h.add_child(cap)
+	var val := _menu_label(value, 24, color)
+	val.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	h.add_child(val)
+	return p
 
 func _menu_button(text: String, bg: Color, fg: Color) -> Button:
 	var b := Button.new()
@@ -330,8 +425,7 @@ func _on_request_menu() -> void:
 	background.visible = false  # menüde oyun girdabı render olmasın (menü bg örtüyor → görünmez kazanç)
 	menu_root.visible = true
 	menu_root.modulate.a = 1.0
-	if game_music:
-		game_music.stop()  # oyun müziğini durdur, menü müziğine dön
+	_stop_game_music()  # oyun müziğini durdur, menü müziğine dön
 	if music:
 		music.play()
 	else:
@@ -439,6 +533,146 @@ func _on_close_settings() -> void:
 	if settings_overlay:
 		settings_overlay.visible = false
 
+# ── KOLEKSİYON (joker galerisi) ──
+# Nadirlik gruplu, kaydırılabilir vitrin. Kartlar oyun-içi joker kartıyla AYNI görünür
+# (art/amblem + foil), game.build_showcase_card ile üretilir → tek kaynak, sapma yok.
+const _RARITY_ORDER := ["common", "uncommon", "rare", "legendary"]
+const _RARITY_TR := {
+	"common": "SIRADAN", "uncommon": "SIRA DIŞI", "rare": "NADİR", "legendary": "EFSANEVİ",
+}
+
+func _on_collection_pressed() -> void:
+	_build_collection()
+	collection_overlay.visible = true
+	_animate_collection_in()
+
+func _build_collection() -> void:
+	if collection_overlay and is_instance_valid(collection_overlay):
+		collection_overlay.queue_free()
+	collection_overlay = Control.new()
+	collection_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	menu_root.add_child(collection_overlay)
+
+	var dim := ColorRect.new()
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color(0, 0, 0, 0.62)
+	collection_overlay.add_child(dim)
+
+	# Neredeyse tam ekran panel (62 kart için yer lazım) — kenarlarda nefes payı.
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	for m in ["margin_left", "margin_right"]:
+		margin.add_theme_constant_override(m, 70)
+	for m in ["margin_top", "margin_bottom"]:
+		margin.add_theme_constant_override(m, 44)
+	collection_overlay.add_child(margin)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", T.felt_panel(T.SIDEBAR, T.BRASS, 18))
+	margin.add_child(panel)
+
+	var pad := MarginContainer.new()
+	for m in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
+		pad.add_theme_constant_override(m, 24)
+	panel.add_child(pad)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 16)
+	pad.add_child(vb)
+
+	# ── Başlık şeridi: KOLEKSİYON + toplam sayaç + KAPAT ──
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 18)
+	var title := _menu_label("KOLEKSİYON", 40, T.EMBER)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	head.add_child(title)
+	var jokers := Jokers.all()
+	var count := _menu_label("%d JOKER" % jokers.size(), 24, T.TEXT_DIM)
+	count.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	count.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	count.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	head.add_child(count)
+	var close := _bar_button("KAPAT", T.BRASS, T.INK)
+	close.pressed.connect(_on_close_collection)
+	head.add_child(close)
+	vb.add_child(head)
+
+	# ── Kaydırılabilir, nadirlik gruplu vitrin ──
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+
+	var list := VBoxContainer.new()
+	list.add_theme_constant_override("separation", 22)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list)
+
+	# Jokerleri nadirliğe göre kümele (veri sırasını koru).
+	var by_rarity := {}
+	for j in jokers:
+		var r := String(j.get("rarity", "common"))
+		if not by_rarity.has(r):
+			by_rarity[r] = []
+		by_rarity[r].append(j)
+
+	for rarity in _RARITY_ORDER:
+		if not by_rarity.has(rarity):
+			continue
+		var group: Array = by_rarity[rarity]
+		var accent: Color = T.RARITY.get(rarity, T.CARD_EDGE)
+		# Bölüm başlığı: renkli nokta + nadirlik adı + adet
+		var sec := HBoxContainer.new()
+		sec.add_theme_constant_override("separation", 10)
+		var dot := Panel.new()
+		var ds := StyleBoxFlat.new()
+		ds.bg_color = accent
+		ds.set_corner_radius_all(9)
+		dot.add_theme_stylebox_override("panel", ds)
+		dot.custom_minimum_size = Vector2(18, 18)
+		var dotwrap := CenterContainer.new()
+		dotwrap.add_child(dot)
+		sec.add_child(dotwrap)
+		var sh := _menu_label("%s  ·  %d" % [_RARITY_TR.get(rarity, rarity), group.size()], 26, accent)
+		sh.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		sec.add_child(sh)
+		list.add_child(sec)
+		# Kartlar — otomatik sarmalı akış
+		var flow := HFlowContainer.new()
+		flow.add_theme_constant_override("h_separation", 16)
+		flow.add_theme_constant_override("v_separation", 18)
+		flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		for j in group:
+			flow.add_child(_collection_cell(j))
+		list.add_child(flow)
+
+func _collection_cell(joker: Dictionary) -> Control:
+	var cell := VBoxContainer.new()
+	cell.add_theme_constant_override("separation", 5)
+	cell.custom_minimum_size = Vector2(150, 0)
+	cell.add_child(game.build_showcase_card(joker))  # oyun-içiyle birebir aynı kart görseli
+	var nm := _menu_label(String(joker.get("name", "?")), 17, T.TEXT)
+	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	nm.custom_minimum_size = Vector2(150, 0)
+	cell.add_child(nm)
+	return cell
+
+func _animate_collection_in() -> void:
+	collection_overlay.modulate.a = 0.0
+	await get_tree().process_frame  # layout otursun → pivot/size geçerli
+	if not is_instance_valid(collection_overlay):
+		return
+	var panel: Control = collection_overlay.get_child(1)  # MarginContainer (panel sarmalayıcı)
+	panel.pivot_offset = panel.size * 0.5
+	panel.scale = Vector2(0.965, 0.965)
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(collection_overlay, "modulate:a", 1.0, 0.16)
+	tw.tween_property(panel, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+func _on_close_collection() -> void:
+	if collection_overlay:
+		collection_overlay.visible = false
+
 func _setting_row(label_text: String, control: Control) -> Control:
 	var h := HBoxContainer.new()
 	h.add_theme_constant_override("separation", 18)
@@ -525,11 +759,83 @@ func _make_music(path: String, vol: float) -> AudioStreamPlayer:
 	p.volume_db = vol
 	return p
 
-# Oyun-içi 8-bit müzik (menüden ayrı; oyuna girişte çalar, menüye dönünce durur).
+# Oyun-içi müzik: durum tabanlı, cross-fade'li (menüden ayrı; menüye dönünce durur).
+# Durum→dosya eşlemesi. Boss/dükkan dosyaları HENÜZ yoksa "normal"e düşülür (aşağıya bak).
+const GAME_TRACKS := {
+	"normal": "res://assets/sounds/8-bit Game Music.wav",
+	"boss":   "res://assets/sounds/music_arcade.mp3",  # 8-Bit Arcade (gergin arcade)
+	"shop":   "res://assets/sounds/music_shop.mp3",    # 8-bit oyun müziği 25 sn versiyonu (sakin dükkan)
+}
+const GAME_TRACK_VOL := {"normal": -6.0, "boss": -5.0, "shop": -8.0}
+
+func _ensure_game_music() -> void:
+	if not _gm_players.is_empty():
+		return
+	for i in 2:
+		var p := AudioStreamPlayer.new()
+		p.bus = "Music"
+		p.volume_db = -40.0
+		add_child(p)
+		_gm_players.append(p)
+
+# Dosya yoksa "normal"e düş → bir durumun parçası eksikse oyun sessiz kalmaz.
+# MP3 ham bayttan yüklenir (editör import'u gerekmez); WAV import'lu olduğu için ResourceLoader.
+func _resolve_track(state: String) -> String:
+	var path: String = GAME_TRACKS.get(state, GAME_TRACKS["normal"])
+	var ok := FileAccess.file_exists(path) if path.to_lower().ends_with(".mp3") else ResourceLoader.exists(path)
+	return path if ok else GAME_TRACKS["normal"]
+
+# Müzik parçasını yükle: MP3 → ham bayttan AudioStreamMP3 (loop'lu, import'suz; bkz. _load_png
+# felsefesi — bu makinede editör import'u çöküyor). WAV → mevcut import'lu yükleyici.
+func _load_music_track(path: String) -> AudioStream:
+	if path.to_lower().ends_with(".mp3"):
+		if not FileAccess.file_exists(path):
+			return null
+		var s := AudioStreamMP3.new()
+		s.data = FileAccess.get_file_as_bytes(path)
+		s.loop = true
+		return s
+	return game._load_wav(path)
+
+# Oyun-içi müzik durumunu ayarla → yumuşak cross-fade. Aynı dosya zaten çalıyorsa
+# (ör. boss dosyası yoksa boss→normal aynı parçada kalır) kesintisiz devam eder.
+func set_game_music_state(state: String) -> void:
+	_gm_state = state
+	_ensure_game_music()
+	var path := _resolve_track(state)
+	if path == _gm_path and _gm_players[_gm_active].playing:
+		return  # aynı dosya zaten çalıyor → restart yok, kesinti yok
+	var stream: AudioStream = _load_music_track(path)
+	if stream == null:
+		return
+	var vol: float = GAME_TRACK_VOL.get(state, -6.0)
+	var nxt := 1 - _gm_active
+	var newp := _gm_players[nxt]
+	var oldp := _gm_players[_gm_active]
+	newp.stream = stream
+	newp.volume_db = -40.0
+	newp.play()
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(newp, "volume_db", vol, 0.8).set_trans(Tween.TRANS_SINE)
+	if oldp.playing:
+		tw.tween_property(oldp, "volume_db", -40.0, 0.8).set_trans(Tween.TRANS_SINE)
+		tw.chain().tween_callback(oldp.stop)
+	_gm_active = nxt
+	_gm_path = path
+
+func _stop_game_music() -> void:
+	for p in _gm_players:
+		p.stop()
+	_gm_state = ""
+	_gm_path = ""
+
+# game.gd music_state sinyali → durum geçişi (boss/shop/normal).
+func _on_music_state(state: String) -> void:
+	set_game_music_state(state)
+
+# Oyuna girişte müzik başlat (normal durum).
 func _play_game_music() -> void:
-	if game_music == null:
-		game_music = _make_music("res://assets/sounds/8-bit Game Music.wav", -6.0)
-	game_music.play()
+	set_game_music_state("normal")
 
 # ── CRT + arka plan ──
 func _add_crt() -> void:
