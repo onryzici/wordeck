@@ -32,7 +32,7 @@ const TILE_GAP := 14
 # Joker kartı boyutu — HER YERDE aynı (rail + dükkan satılık + dükkan satış). Taş yüksekliğiyle
 # aynı (166) ama daha GENİŞ (150) → ince durmaz, daha tok kart (oran ~0.90). Sanat bu orana kırpılı.
 const JOKER_W := 150
-const JOKER_H := 166
+const JOKER_H := 200  # 166→200: art kartları (880×1200 portre) şişmesin; yuva oranı görsele yaklaşsın
 const LIFT := 32
 const DECK_RESERVE := 140.0  # sağda deste yığını için ayrılan pay (el onun SOLUNA ortalanır)
 const MAX_JOKERS := 5
@@ -733,11 +733,18 @@ func _build_joker_shelf() -> Control:
 # Özel joker kart görselleri (tam-kart PNG, ~116×144 oranında). id → yol.
 const JOKER_ART := {
 	"anagram-seytani": "res://assets/images/jokers/anagram-seytani.png",
+	# Yeni pixel-art joker kartları (temaya uygun eşleştirildi):
+	"turkce-belasi": "res://assets/images/jokers/turkce-belasi.png",     # kırmızı şeytan
+	"patlamis-misir": "res://assets/images/jokers/patlamis-misir.png",   # zombi koyun
+	"intikam": "res://assets/images/jokers/intikam.png",                 # vampir koyun
+	"banker": "res://assets/images/jokers/banker.png",                   # centilmen koyun
+	"murekkep-lekesi": "res://assets/images/jokers/murekkep-lekesi.png", # venom/simbiyot
 	# mimar/esssiz/denge-bekcisi görselleri kullanıcı isteğiyle ŞİMDİLİK kaldırıldı (dosyalar duruyor).
 }
 # Pixel-art görseller (NEAREST filtre, keskin kalsın). İllüstrasyonlar bunda YOK → LINEAR (yumuşak ölçek).
 const JOKER_ART_PIXEL := {
 	"anagram-seytani": true,
+	"turkce-belasi": true, "patlamis-misir": true, "intikam": true, "banker": true, "murekkep-lekesi": true,
 }
 
 # Joker kart yüzü: özel görseli varsa tam-kart PNG (keskin pixel-art), yoksa stylebox+emoji düzeni.
@@ -4960,6 +4967,13 @@ func demo_jokers() -> void:
 	# Her nadirlikten birer joker → 4 farklı foil efektini yan yana test et.
 	# common (sheen) · uncommon (parlak sheen) · rare (holo foil) · legendary (holo+polychrome+kıvılcım).
 	for jid in ["sesli-avcisi", "mimar", "esssiz", "palindrom-tanrisi"]:
+		JokerActions.add_joker_by_id(state, jid)
+	_animate_jokers = true
+	_refresh(false, false)
+
+# Yeni pixel-art joker kartlarını rafta yan yana göster (boyut/foil testi) — 5 yeni görsel.
+func demo_new_art() -> void:
+	for jid in ["turkce-belasi", "patlamis-misir", "intikam", "banker", "murekkep-lekesi"]:
 		JokerActions.add_joker_by_id(state, jid)
 	_animate_jokers = true
 	_refresh(false, false)

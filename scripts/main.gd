@@ -63,7 +63,7 @@ func _ready() -> void:
 	var capturing := args.has("--capture")
 	# Demo bayraklarından biri var mı? (capture'sız CANLI gösterim için de kullanılır)
 	var has_demo := false
-	for f in ["--demo", "--play", "--shop", "--lose", "--enh", "--boss", "--jokers", "--enhpick", "--cashout", "--refill", "--blind"]:
+	for f in ["--demo", "--play", "--shop", "--lose", "--enh", "--boss", "--jokers", "--newart", "--enhpick", "--cashout", "--refill", "--blind"]:
 		if args.has(f):
 			has_demo = true
 
@@ -85,6 +85,8 @@ func _ready() -> void:
 			game.demo_boss()
 		if args.has("--jokers"):
 			game.demo_jokers()
+		if args.has("--newart"):
+			game.demo_new_art()
 		if args.has("--enhpick"):
 			game.demo_enh_picker()
 		if args.has("--cashout"):
