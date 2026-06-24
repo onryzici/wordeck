@@ -12,6 +12,7 @@ const T = preload("res://scripts/theme.gd")
 const Settings = preload("res://scripts/settings.gd")
 const Jokers = preload("res://data/jokers.gd")
 const Records = preload("res://scripts/records.gd")
+const L = preload("res://scripts/loc.gd")  # lokalizasyon (tr/en)
 
 const RULES_TEXT := "Elindeki harf taşlarından geçerli bir TÜRKÇE kelime kur, OYNA'ya bas.\n\nSkor = ÇİP × ÇARPAN. Uzun kelimeler ve jokerler skoru patlatır.\n\nHer turun bir HEDEF puanı var; tutturursan geçersin. Sınırlı kelime HAKKIN ve harf DEĞİŞİM hakkın var — değiştirmek hak harcamaz.\n\nKullanmadığın harfler elinde kalır; deste 8'e tamamlanır. Asıl strateji: şimdi mi oynasam, yoksa harf tutup daha büyük kombo mu kursam?"
 
@@ -197,7 +198,7 @@ func _bar_button(text: String, bg: Color, fg: Color) -> Button:
 
 func _menu_label(text: String, size: int, color: Color) -> Label:
 	var l := Label.new()
-	l.text = text
+	l.text = L.t(text)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	l.add_theme_font_override("font", T.load_font())
 	l.add_theme_font_size_override("font_size", size)
@@ -285,7 +286,7 @@ func _record_row(caption: String, value: String, color: Color) -> Control:
 
 func _menu_button(text: String, bg: Color, fg: Color) -> Button:
 	var b := Button.new()
-	b.text = text
+	b.text = L.t(text)
 	b.custom_minimum_size = Vector2(360, 68)
 	b.focus_mode = Control.FOCUS_NONE
 	b.add_theme_font_override("font", T.load_font())
@@ -477,7 +478,7 @@ func _build_help() -> void:
 	vb.add_child(_menu_label("NASIL OYNANIR", 40, T.EMBER))
 
 	var body := Label.new()
-	body.text = RULES_TEXT
+	body.text = L.t(RULES_TEXT)
 	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_theme_font_override("font", T.load_font())
 	body.add_theme_font_size_override("font_size", 22)
@@ -519,6 +520,7 @@ func _build_settings() -> void:
 	panel.add_child(vb)
 
 	vb.add_child(_menu_label("AYARLAR", 40, T.EMBER))
+	vb.add_child(_setting_row("Dil / Language", _make_lang_toggle()))
 	vb.add_child(_setting_row("Müzik Sesi", _make_slider(Settings.music_vol, "music")))
 	vb.add_child(_setting_row("Efekt Sesi", _make_slider(Settings.sfx_vol, "sfx")))
 	vb.add_child(_setting_row("Ekran Sarsıntısı", _make_toggle(Settings.shake_on, "shake")))
@@ -587,7 +589,7 @@ func _build_collection() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	head.add_child(title)
 	var jokers := Jokers.all()
-	var count := _menu_label("%d JOKER" % jokers.size(), 24, T.TEXT_DIM)
+	var count := _menu_label(L.t("%d JOKER") % jokers.size(), 24, T.TEXT_DIM)
 	count.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	count.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	count.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -633,7 +635,7 @@ func _build_collection() -> void:
 		var dotwrap := CenterContainer.new()
 		dotwrap.add_child(dot)
 		sec.add_child(dotwrap)
-		var sh := _menu_label("%s  ·  %d" % [_RARITY_TR.get(rarity, rarity), group.size()], 26, accent)
+		var sh := _menu_label("%s  ·  %d" % [L.t(_RARITY_TR.get(rarity, rarity)), group.size()], 26, accent)
 		sh.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		sec.add_child(sh)
 		list.add_child(sec)
@@ -719,10 +721,28 @@ func _make_toggle(value: bool, kind: String) -> Button:
 	b.pressed.connect(_on_toggle_pressed.bind(b))
 	return b
 
+# Dil seçimi: TÜRKÇE ↔ ENGLISH (sözlük + harf seti + arayüz). Sonraki oyunda (OYNA) geçerli olur.
+func _make_lang_toggle() -> Button:
+	var b := _menu_button(_lang_label(Settings.language), T.BRASS, T.INK)
+	b.custom_minimum_size = Vector2(170, 50)
+	b.add_theme_font_size_override("font_size", 24)
+	b.pressed.connect(_on_lang_pressed.bind(b))
+	return b
+
+func _lang_label(l: String) -> String:
+	return "TÜRKÇE" if l == "tr" else "ENGLISH"
+
+func _on_lang_pressed(b: Button) -> void:
+	Settings.language = "en" if Settings.language == "tr" else "tr"
+	Settings.save()
+	# Tüm ekranlar (menü + oyun UI) _ready'de bir kez kuruluyor → dili anında, eksiksiz
+	# uygulamak için sahneyi yeniden yükle (kullanıcı menüde; temiz ve tutarlı).
+	get_tree().reload_current_scene()
+
 func _on_toggle_pressed(b: Button) -> void:
 	var nv := not bool(b.get_meta("val"))
 	b.set_meta("val", nv)
-	b.text = "AÇIK" if nv else "KAPALI"
+	b.text = L.t("AÇIK") if nv else L.t("KAPALI")
 	b.add_theme_stylebox_override("normal", T.button_filled(T.GOOD if nv else T.FELT_700))
 	b.add_theme_stylebox_override("hover", T.button_filled((T.GOOD if nv else T.FELT_700).lightened(0.1)))
 	match String(b.get_meta("kind")):

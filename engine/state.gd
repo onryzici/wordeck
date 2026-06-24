@@ -8,7 +8,7 @@ const Deck = preload("res://engine/deck.gd")
 
 static func create_state(seed_str = null) -> Dictionary:
 	var s: String = seed_str if seed_str != null else Config.DEFAULT_SEED
-	var deck := Deck.build_deck(LetterBag.BAG)
+	var deck := Deck.build_deck(LetterBag.bag())  # dil-duyarlı (tr/en torba)
 	return {
 		"run": {
 			"ante": 1,

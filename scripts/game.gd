@@ -21,6 +21,9 @@ const Dictionary_ = preload("res://engine/dictionary.gd")
 const Scoring = preload("res://engine/scoring.gd")
 const WordTiers = preload("res://data/word_tiers.gd")
 const LETTER_VALUES = preload("res://data/letter_values.gd")
+const TurkishCase = preload("res://engine/turkish_case.gd")
+const LetterBag = preload("res://data/letter_bag.gd")
+const L = preload("res://scripts/loc.gd")  # lokalizasyon (tr/en)
 const T = preload("res://scripts/theme.gd")
 
 const TILE_W := 124
@@ -39,6 +42,7 @@ signal music_state(state: String)  # main.gd dinler → oyun müziği durumu (no
 
 var state: Dictionary
 var selected_ids: Array = []
+var _dict_lang := ""  # yüklü sözlüğün dili (gereksiz 3MB reload'u önler)
 var hand_cards_by_id: Dictionary = {}
 var tile_by_id: Dictionary = {}
 var _busy := false
@@ -218,19 +222,31 @@ func _ready() -> void:
 	_blink = _load_wav("res://assets/sounds/Short Triple Blink Notification.wav")
 	_collect = _make_tone_wav([880.0, 1320.0], 0.12, 16.0, 0.5)        # kısa coin tık'ı
 	_collect_big = _make_tone_wav([660.0, 880.0, 1100.0, 1320.0], 0.34, 7.0, 0.55)  # final çan/arp
-	Dictionary_.load_from_file("res://data/kelimeler.txt")
-	_init_run()
+	_init_run()  # dil + sözlük _init_run içinde uygulanır
 	_build_ui()
 	_refresh(false, false)  # menü açıkken sessiz/statik; OYNA → enter_session() canlandırır
 
 # Taze RASTGELE seed'li yeni run kurar (her oyunda farklı kartlar). UI'ye dokunmaz.
 func _init_run() -> void:
 	randomize()
+	_apply_language()  # dil bayrakları + doğru sözlük (yeni run güncel dili alır)
 	var seed_str := "run-%s-%d" % [str(Time.get_unix_time_from_system()), randi()]
 	state = State.create_state(seed_str)
 	Round.start_run(state)
 	for jid in Config.STARTING_JOKERS:  # başlangıç jokeri (şu an boş; denge için, bkz. sim)
 		JokerActions.add_joker_by_id(state, jid)
+
+# Dil uygula: casing/harf-değeri/torba bayrakları + doğru sözlük. Her yeni run'da çağrılır →
+# ayarlardan dil değişince sonraki oyun otomatik geçer. Sözlük yalnız dil değişince yüklenir.
+func _apply_language() -> void:
+	var lang := Settings.language
+	TurkishCase.set_lang(lang)
+	LETTER_VALUES.set_lang(lang)
+	LetterBag.set_lang(lang)
+	if _dict_lang != lang or not Dictionary_.is_loaded():
+		var path := "res://data/master.txt" if lang == "en" else "res://data/kelimeler.txt"
+		Dictionary_.load_from_file(path)
+		_dict_lang = lang
 
 # Menüden OYNA'ya geçince: TAZE run (yeni seed → yeni kartlar) + desteden geliş + shuffle sesi.
 func enter_session() -> void:
@@ -401,7 +417,7 @@ func _build_deck_stack() -> Control:
 
 func _label(text: String, size: int, color: Color = T.TEXT, outline: Color = T.OUTLINE, outline_size: int = -1) -> Label:
 	var l := Label.new()
-	l.text = text
+	l.text = L.t(text)  # dil-duyarlı (haritada yoksa Türkçe kalır)
 	l.add_theme_font_size_override("font_size", size)
 	l.add_theme_color_override("font_color", color)
 	var os := outline_size if outline_size >= 0 else maxi(3, int(size / 9.0))
@@ -416,6 +432,7 @@ func _center(l: Label) -> Label:
 # Her HARFİ bağımsız dalgalandıran yazı (Balatro tarzı — biri aşağı biri yukarı).
 # RichTextLabel [wave] efektini kullanır (kendi kendine animasyonlu). Font default theme'den (m6x11).
 func _wavy_label(text: String, size: int, color: Color = T.TEXT, outline: Color = T.OUTLINE, amp: float = 8.0, freq: float = 4.0, outline_size: int = -1) -> RichTextLabel:
+	text = L.t(text)  # dil-duyarlı (dalga uygulanmadan önce çevir)
 	var r := RichTextLabel.new()
 	r.bbcode_enabled = true
 	r.fit_content = true
@@ -653,7 +670,7 @@ func _float_minus(anchor: Control, amount: int, color: Color) -> void:
 
 func _chunky_btn(text: String, color: Color, fg: Color) -> Button:
 	var b := Button.new()
-	b.text = text
+	b.text = L.t(text)
 	b.add_theme_font_size_override("font_size", 28)
 	b.add_theme_color_override("font_color", fg)
 	b.add_theme_stylebox_override("normal", T.button_filled(color))
@@ -833,7 +850,7 @@ func _joker_info_card(card_jid: String) -> Control:
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc.custom_minimum_size = Vector2(258, 0)
 	desc.add_theme_font_size_override("normal_font_size", 20)
-	desc.text = "[center]%s[/center]" % _highlight_desc(String(joker.get("description", "")))
+	desc.text = "[center]%s[/center]" % _highlight_desc(L.t(String(joker.get("description", ""))))
 	dpad.add_child(desc)
 	v.add_child(dpanel)
 
@@ -892,6 +909,8 @@ func _highlight_desc(s: String) -> String:
 	s = s.replace("çarpan", "[color=%s]çarpan[/color]" % mult)
 	s = s.replace("Çip", "[color=%s]Çip[/color]" % chip)
 	s = s.replace("çip", "[color=%s]çip[/color]" % chip)
+	s = s.replace("Chips", "[color=%s]Chips[/color]" % chip)  # İngilizce anahtar kelimeler
+	s = s.replace("Mult", "[color=%s]Mult[/color]" % mult)
 	return s
 
 func _joker_card_sb(accent: Color, radius: int = 9) -> StyleBoxFlat:
@@ -994,7 +1013,7 @@ func _joker_inner(joker: Dictionary, rarity: Color) -> Control:
 	var plate := PanelContainer.new()
 	plate.add_theme_stylebox_override("panel", _joker_plate_sb(rarity))
 	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var nm := _center(_label(String(joker["name"]).to_upper(), 11, T.INK, Color(1, 1, 1, 0.25), 1))
+	var nm := _center(_label(L.t(String(joker["name"])).to_upper(), 11, T.INK, Color(1, 1, 1, 0.25), 1))
 	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	nm.custom_minimum_size = Vector2(94, 0)
 	nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1149,7 +1168,7 @@ func _set_shop_sidebar(on: bool) -> void:
 	if on:
 		_head_panel.add_theme_stylebox_override("panel", _marquee_box())  # kırmızı marquee
 		_head_panel.custom_minimum_size = Vector2(0, 104)  # marquee daha yüksek (kullanıcı)
-		blind_header.text = "DÜKKAN"  # şapkasız A (kullanıcı)
+		blind_header.text = L.t("DÜKKAN")  # şapkasız A (kullanıcı)
 		blind_header.add_theme_color_override("font_color", Color(1.0, 0.86, 0.32))  # altın
 		if _target_box != null:
 			_target_box.visible = false
@@ -1219,7 +1238,7 @@ func _build_action_row() -> Control:
 	h.add_theme_constant_override("separation", 20)
 	h.alignment = BoxContainer.ALIGNMENT_CENTER
 	play_btn = Button.new()
-	play_btn.text = "OYNA"
+	play_btn.text = L.t("OYNA")
 	play_btn.add_theme_font_size_override("font_size", 38)
 	play_btn.add_theme_color_override("font_color", T.INK)
 	play_btn.add_theme_stylebox_override("normal", T.button_filled(T.BRASS))
@@ -1229,7 +1248,7 @@ func _build_action_row() -> Control:
 	play_btn.custom_minimum_size = Vector2(230, 0)
 	play_btn.pressed.connect(_on_play)
 	disc_btn = Button.new()
-	disc_btn.text = "DEĞİŞTİR"
+	disc_btn.text = L.t("DEĞİŞTİR")
 	disc_btn.add_theme_font_size_override("font_size", 34)
 	disc_btn.add_theme_color_override("font_color", T.TEXT)
 	disc_btn.add_theme_stylebox_override("normal", T.button_outline(T.CARD_FACE))
@@ -1253,7 +1272,7 @@ func _build_action_row() -> Control:
 	shuffle_btn.add_theme_stylebox_override("hover", _shuffle_hover_sb)
 	shuffle_btn.add_theme_stylebox_override("pressed", _shuffle_pressed_sb)
 	shuffle_btn.add_theme_constant_override("outline_size", 0)
-	shuffle_btn.tooltip_text = "Harfleri karıştır"
+	shuffle_btn.tooltip_text = L.t("Harfleri karıştır")
 	shuffle_btn.pivot_offset = Vector2(ssz, ssz) / 2.0  # ortadan ölçeklensin (hover kalkma)
 	shuffle_btn.mouse_entered.connect(func(): _hover_lift(shuffle_btn, 1.1))
 	shuffle_btn.mouse_exited.connect(func(): _hover_lift(shuffle_btn, 1.0))
@@ -2040,7 +2059,7 @@ func _on_play() -> void:
 	_busy = false
 	_set_buttons(true)
 	if state["round"]["status"] == "won":
-		hint_label.text = "TUR GEÇİLDİ!"
+		hint_label.text = L.t("TUR GEÇİLDİ!")
 		word_label.text = "✦"
 		word_label.add_theme_color_override("font_color", T.EMBER)
 		await _sweep_hand_away()  # eldeki taşlar dağıtılır gibi uçup kaybolur → sonra panel
@@ -2973,11 +2992,11 @@ func _refresh_hud() -> void:
 	var run: Dictionary = state["run"]
 	var round_d: Dictionary = state["round"]
 	_set_shop_sidebar(false)  # oyun modunda normal blind/hedef göster
-	blind_header.text = String(round_d["blind"]["name"]).to_upper()
+	blind_header.text = L.t(String(round_d["blind"]["name"]).to_upper())
 	target_label.text = str(round_d["target"])
 	var bt := String(round_d["blind"].get("type", "small"))
 	var rew := int(round_d["blind"].get("reward", 1))
-	target_reward_label.text = "Ödül: " + "$".repeat(clampi(rew, 1, 6))
+	target_reward_label.text = L.t("Ödül: ") + "$".repeat(clampi(rew, 1, 6))
 	# blind çipi tür rengine göre: tur1=yeşil, tur2=altın, patron=kırmızı
 	var bc: Color = T.GOOD if bt == "small" else (T.BRASS if bt == "big" else T.MULT)
 	if _chip_sb:
@@ -3013,7 +3032,7 @@ func _update_boss_banner() -> void:
 	var is_boss: bool = round_d["blind"].get("type", "") == "boss" and boss != null
 	boss_panel.visible = is_boss
 	if is_boss:
-		boss_name_label.text = "%s  %s" % [boss.get("icon", "💀"), String(boss["name"]).to_upper()]
+		boss_name_label.text = "%s  %s" % [boss.get("icon", "💀"), L.t(String(boss["name"])).to_upper()]
 		boss_desc_label.text = boss["description"]
 		_pop(boss_panel, 1.05)
 
@@ -3201,6 +3220,7 @@ func _close_overlay() -> void:
 
 # Harf harf YUKARIDAN düşerek beliren başlık (her harf gecikmeli). HBox döner; _play_drop_in ile oynatılır.
 func _drop_in_label(text: String, size: int, color: Color, outline: Color = T.OUTLINE, ol_size: int = -1) -> Control:
+	text = L.t(text)  # dil-duyarlı (karakterlere bölünmeden önce çevir)
 	var box := HBoxContainer.new()
 	box.add_theme_constant_override("separation", 1)
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -3248,7 +3268,7 @@ func _cash_chip(col: Color) -> Control:
 # Turuncu TOPLA butonundaki toplam sayım setter'ı (tween_method güvenli çağrı).
 func _set_cash_total(x: float) -> void:
 	if _cash_go_btn and is_instance_valid(_cash_go_btn):
-		_cash_go_btn.text = "TOPLA:  $%d" % int(round(x))
+		_cash_go_btn.text = L.t("TOPLA:  $%d") % int(round(x))
 
 # Tur bitince eldeki taşlar "dağıtılır gibi" uçup kaybolur (stagger; yukarı süzülür + döner + fade).
 func _sweep_hand_away() -> void:
@@ -3600,7 +3620,7 @@ func _blind_column(blind: Dictionary, i: int, cur: int) -> Control:
 	tsb.content_margin_top = 4
 	tsb.content_margin_bottom = 4
 	tab.add_theme_stylebox_override("panel", tsb)
-	var tname := String(blind["name"]).to_upper()
+	var tname := L.t(String(blind["name"]).to_upper())
 	if blind["type"] == "boss":
 		tname = "PATRON"
 		if active and state["round"].get("boss", null) != null:
@@ -3660,7 +3680,7 @@ func _blind_column(blind: Dictionary, i: int, cur: int) -> Control:
 	hr.add_child(_label("%d" % Round.target_for_blind(state, blind), 36, T.ORANGE, T.OUTLINE, 5))
 	iv.add_child(hr)
 	var dollars := "$".repeat(clampi(int(blind["reward"]), 1, 6))
-	iv.add_child(_center(_label("Ödül:  %s" % dollars, 17, T.BRASS)))
+	iv.add_child(_center(_label(L.t("Ödül:  %s") % dollars, 17, T.BRASS)))
 	info.add_child(iv)
 	v.add_child(info)
 	# 6) alt: durum / ATLA
@@ -3784,7 +3804,7 @@ func _build_shop_ui() -> void:
 
 	# (SHOP marquee artık SOL PANELDE — _set_shop_sidebar; merkezde tekrar etmez)
 	if _shop_reward:
-		var sub := "Tur geçildi!   +$%d   (taban %d · hak %d · faiz %d)" % [
+		var sub := L.t("Tur geçildi!   +$%d   (taban %d · hak %d · faiz %d)") % [
 			_shop_reward["total"], _shop_reward["base"], _shop_reward["leftover"], _shop_reward["interest"]]
 		shop_view.add_child(_center(_label(sub, 15, T.TEXT_DIM)))
 	if _shop_msg != "":
@@ -3811,7 +3831,7 @@ func _build_shop_ui() -> void:
 	acol.add_child(nb)
 	_shop_next_btn = nb  # öğretici turu için referans
 	var can_rr: bool = state["run"]["money"] >= shop["rerollCost"]
-	var rr := _chunky_btn("YENİLE\n$%d" % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
+	var rr := _chunky_btn(L.t("YENİLE\n$%d") % shop["rerollCost"], T.GOOD if can_rr else T.FELT_700, T.INK)
 	rr.custom_minimum_size = Vector2(0, 74)
 	rr.disabled = not can_rr
 	rr.pressed.connect(_on_reroll)
@@ -4047,7 +4067,7 @@ func _voucher_card(v: Dictionary) -> Control:
 	var root := Control.new()
 	root.custom_minimum_size = Vector2(172, 188 + 16)
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
-	root.tooltip_text = v["description"]
+	root.tooltip_text = L.t(String(v["description"]))
 
 	var card := PanelContainer.new()
 	card.add_theme_stylebox_override("panel", _item_sb(T.LILAC.lightened(0.15), T.LILAC.darkened(0.42)))
@@ -4063,7 +4083,7 @@ func _voucher_card(v: Dictionary) -> Control:
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vb.add_child(_center(_label("KUPON", 12, T.LILAC.lerp(Color.WHITE, 0.4))))
 	vb.add_child(_center(_label("◈", 42, Color(1, 0.97, 0.88))))
-	var nm := _center(_label(String(v["name"]).to_upper(), 15, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 4))
+	var nm := _center(_label(L.t(String(v["name"])).to_upper(), 15, Color(1, 0.97, 0.88), Color(0.06, 0.04, 0.02), 4))
 	nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	nm.custom_minimum_size = Vector2(132, 0)
 	vb.add_child(nm)
@@ -4138,7 +4158,7 @@ func _build_shop_selection(bc, ec, pending) -> Control:
 	elif pending != null:
 		var pe = Enhancements.by_id(pending)
 		var pcol := Color(pe["color"])
-		prow.add_child(_center_v(_label("%s\nNEREYE? →" % String(pe["name"]).to_upper(), 18, pcol)))
+		prow.add_child(_center_v(_label(L.t("%s\nNEREYE? →") % L.t(String(pe["name"])).to_upper(), 18, pcol)))
 		var flow := HFlowContainer.new()
 		flow.add_theme_constant_override("h_separation", 7)
 		flow.add_theme_constant_override("v_separation", 7)
@@ -4149,7 +4169,7 @@ func _build_shop_selection(bc, ec, pending) -> Control:
 			var lb := _chunky_btn(ch, T.CARD_FACE, T.INK)
 			lb.custom_minimum_size = Vector2(60, 72)
 			lb.add_theme_font_size_override("font_size", 34)
-			lb.tooltip_text = "“%s” (deste: ×%d) — %s ekle" % [ch, entry["count"], pe["name"]]
+			lb.tooltip_text = L.t("“%s” (deste: ×%d) — %s ekle") % [ch, entry["count"], L.t(String(pe["name"]))]
 			lb.pressed.connect(_on_apply_enh_to_letter.bind(ch))
 			flow.add_child(lb)
 		prow.add_child(flow)
@@ -4168,11 +4188,11 @@ func _enh_choice_card(eid: String) -> Control:
 	vb.alignment = BoxContainer.ALIGNMENT_CENTER
 	vb.add_theme_constant_override("separation", 6)
 	vb.add_child(_center(_label(e["symbol"], 46, accent)))
-	vb.add_child(_center(_label(String(e["name"]).to_upper(), 16, accent)))
+	vb.add_child(_center(_label(L.t(String(e["name"])).to_upper(), 16, accent)))
 	var d := _center(_label(e["desc"], 13, T.TEXT_DIM))
 	d.custom_minimum_size = Vector2(150, 0)
 	vb.add_child(d)
-	return _shop_card(accent, vb, "SEÇ", true, _on_choose_enhancement.bind(eid), e["desc"])
+	return _shop_card(accent, vb, "SEÇ", true, _on_choose_enhancement.bind(eid), L.t(String(e["desc"])))
 
 # Tek satırı yatayda ortalar (marquee için).
 func _center_h(node: Control) -> Control:
@@ -4256,7 +4276,7 @@ func _sellable_joker_card(joker: Dictionary) -> Control:
 func _after_shop_change() -> void:
 	_hide_joker_info()  # eski kart serbest bırakılırken bilgi kartı askıda kalmasın
 	money_label.text = "$%d" % state["run"]["money"]
-	joker_caption.text = "JOKERLER %d/%d — tıkla → SAT" % [state["run"]["jokers"].size(), MAX_JOKERS]
+	joker_caption.text = L.t("JOKERLER %d/%d — tıkla → SAT") % [state["run"]["jokers"].size(), MAX_JOKERS]
 	_animate_jokers = true  # alınan/satılan sonrası jokerler zıplayarak yerleşsin
 	_rebuild_jokers()
 	_build_shop_ui()
@@ -4401,7 +4421,7 @@ func _open_pack_sequence(choices, kind: String) -> void:
 		hit.gui_input.connect(_pack_card_tilt.bind(card))
 		hit.pressed.connect(_resolve_pack_pick.bind(ov, seqfx, cards, card, choices[i], kind))
 	# "X'TEN 1 SEÇ" başlığı yukarıda belirir
-	var sel := _label("%d'TEN 1 SEÇ" % n, 32, T.BRASS, T.OUTLINE, 6)
+	var sel := _label(L.t("%d'TEN 1 SEÇ") % n, 32, T.BRASS, T.OUTLINE, 6)
 	sel.add_theme_font_override("font", _tile_font)
 	sel.size = Vector2(420, 50)
 	sel.position = Vector2(center.x - 210.0, center.y - 230.0)
@@ -4758,7 +4778,7 @@ func _add_run_stats() -> void:
 	var won: bool = run["status"] == "won"
 	# Kalıcı rekorlara işle; KIRILAN rekorların anahtarlarını al (uç ekranda vurgu için).
 	var fresh: Dictionary = Records.submit(stats, int(run["ante"]), won)
-	var defeated := String(state["round"]["blind"]["name"]) if run["status"] == "lost" else "—"
+	var defeated := L.t(String(state["round"]["blind"]["name"]).to_upper()) if run["status"] == "lost" else "—"
 	var best := "%s · %d" % [stats.get("bestWord", "—"), stats.get("bestScore", 0)]
 	if String(stats.get("bestWord", "")) == "":
 		best = "—"
@@ -4858,7 +4878,7 @@ func _on_info_btn() -> void:
 	if round_d["blind"].get("type", "") == "boss" and boss != null:
 		var bp := PanelContainer.new()
 		bp.add_theme_stylebox_override("panel", T.felt_panel(Color(0.30, 0.06, 0.05, 0.9), T.MULT, 12))
-		var bl := _label("⚠ PATRON — %s\n%s" % [String(boss["name"]).to_upper(), boss["description"]], 19, T.TEXT)
+		var bl := _label("⚠ %s — %s\n%s" % [L.t("PATRON"), L.t(String(boss["name"])).to_upper(), L.t(String(boss["description"]))], 19, T.TEXT)
 		bl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		bl.custom_minimum_size = Vector2(560, 0)
 		bp.add_child(bl)
@@ -5093,10 +5113,10 @@ func _tut_present(text: String, rect_fn, place: String, alpha: float, spotlight:
 		return
 	_tut_layer.visible = true
 	_tut_panel.visible = false  # konumlanana kadar gizle (sol-üstte flaş olmasın)
-	_tut_bubble_label.text = text
+	_tut_bubble_label.text = L.t(text)
 	_tut_next_btn.visible = btn_visible
 	if btn_visible:
-		_tut_next_btn.text = btn
+		_tut_next_btn.text = L.t(btn)
 	# Layout otursun (yeni el async) + balon boyutu (yeni metin) hesaplansın
 	await get_tree().create_timer(0.18).timeout
 	if _tut_layer == null or not is_instance_valid(_tut_layer):

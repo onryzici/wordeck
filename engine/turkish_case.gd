@@ -7,7 +7,16 @@ const LOWER := {
 	"Ç": "ç", "Ş": "ş", "Ğ": "ğ", "Ü": "ü", "Ö": "ö",
 }
 
+# Dil bayrağı (sunum katmanı set eder). "en" → düz lowercase ("I"→"i", Türkçe haritası atlanır).
+# Varsayılan "tr" → motor testleri Türkçe davranışı korur.
+static var _lang := "tr"
+
+static func set_lang(l: String) -> void:
+	_lang = l
+
 static func tr_lower(s: String) -> String:
+	if _lang == "en":
+		return s.to_lower()  # İngilizce: "I"→"i", Türkçe özel küçültme yok
 	var out := ""
 	for ch in s:
 		if LOWER.has(ch):

@@ -11,6 +11,7 @@ static var shake_on := true      # ekran sarsıntısı
 static var particles_on := true  # partikül/kor efektleri
 static var fullscreen := false
 static var tutorial_done := false  # ilk-giriş öğreticisi gösterildi mi (bir kez)
+static var language := "tr"        # oyun dili: "tr" (Türkçe) / "en" (English) — sözlük+harf+arayüz
 static var _ready := false
 
 static func init() -> void:
@@ -26,6 +27,7 @@ static func init() -> void:
 		particles_on = cf.get_value("juice", "particles", particles_on)
 		fullscreen = cf.get_value("video", "fullscreen", fullscreen)
 		tutorial_done = cf.get_value("progress", "tutorialDone", tutorial_done)
+		language = cf.get_value("locale", "lang", language)
 	apply_audio()
 	apply_video()
 
@@ -37,6 +39,7 @@ static func save() -> void:
 	cf.set_value("juice", "particles", particles_on)
 	cf.set_value("video", "fullscreen", fullscreen)
 	cf.set_value("progress", "tutorialDone", tutorial_done)
+	cf.set_value("locale", "lang", language)
 	cf.save(PATH)
 
 static func _ensure_buses() -> void:
