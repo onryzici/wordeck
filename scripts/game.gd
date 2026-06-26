@@ -159,20 +159,20 @@ const TRAUMA_COLLIDE := 0.55  # çip×çarpan çarpışması
 # (cubic-bezier 0.34,1.56 ≈ TRANS_BACK/EASE_OUT), soldan-sağa ritmik tetikleme, yükselen
 # pitch merdiveni (C-D-E-F-G), skora göre KADEMELİ sarsıntı. Tüm sayılar editörde ayarlanır.
 @export_group("Puanlama Ritmi (sn)")
-@export var letter_step_delay := 0.22   # harfler arası bekleme — RİTMİN KALBİ (taş "+N"leri tek tek belirsin)
+@export var letter_step_delay := 0.75   # harfler arası bekleme — RİTMİN KALBİ (kullanıcı: 0.75 sn)
 @export var op_step_delay := 0.30       # harf-üstü geliştirme (foil/holo) katkıları arası
 @export var joker_step_delay := 0.34    # joker katkıları arası
 @export var tier_step_delay := 0.32     # kademe (el türü) çipi
 @export var final_pause := 0.32         # final çarpım öncesi dramatik duraklama
 @export_group("Taş Tetikleme")
-@export var tile_hop_height := 14.0     # tetiklenen taşın yukarı zıplaması (px)
-@export var tile_punch_scale := 1.25    # scale punch tepe değeri
-@export var tile_trigger_dur := 0.18    # hop+punch toplam süresi
+@export var tile_hop_height := 24.0     # tetiklenen taşın yukarı zıplaması (px) — daha belirgin
+@export var tile_punch_scale := 1.4     # scale punch tepe değeri — daha güçlü
+@export var tile_trigger_dur := 0.24    # hop+punch toplam süresi — daha dolu yay
 @export var tile_tilt_max := 4.0        # tetiklemede ufak rastgele eğim (±derece) — robotik durmasın
 @export_group("Kelime Havalanması")
-@export var word_lift_height := 18.0    # oynanan taşların toplu kalkışı (px)
+@export var word_lift_height := 28.0    # oynanan taşların toplu kalkışı (px) — daha yukarı
 @export var word_lift_dur := 0.25
-@export var word_lift_scale := 1.06     # kalkışta hafif büyüme
+@export var word_lift_scale := 1.18     # kalkışta büyüme — skorlanan kartlar daha BÜYÜK görünsün
 @export var word_dim_others := 0.5      # oynanmayan taşların kararması (alfa)
 @export_group("Yüzen Sayılar")
 @export var float_distance := 40.0      # +N yukarı süzülme mesafesi (px)
@@ -1444,11 +1444,54 @@ func _make_tile(card: Dictionary) -> Control:
 	tile.add_child(visual)
 	tile.set_meta("visual", visual)
 
+	# DERİNLİK GÖLGESİ — kart kalkınca/seçilince altında belirir (tile_card sürer).
+	var shadow := Panel.new()
+	var shsb := StyleBoxFlat.new()
+	shsb.bg_color = Color(0.02, 0.07, 0.05, 0.55)
+	shsb.set_corner_radius_all(18)
+	shsb.anti_aliasing = false
+	shadow.add_theme_stylebox_override("panel", shsb)
+	shadow.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shadow.modulate.a = 0.0
+	tile.add_child(shadow)
+	tile.move_child(shadow, 0)   # visual'in ARKASINDA
+	tile.set_meta("shadow", shadow)
+
+	# GERÇEK 3D PERSPEKTİF EĞİM: içerik SubViewport'a render edilir; görünen TextureRect'e card_tilt_3d
+	# shader'ı uygulanır → kart imlece doğru GERÇEKTEN öne/arkaya yatar (Balatro/Unity hissi). tile_card sürer.
+	var vp := SubViewport.new()
+	vp.size = Vector2i(int(TILE_W), int(TILE_H))
+	vp.transparent_bg = true
+	vp.disable_3d = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	visual.add_child(vp)
+	var content := Control.new()
+	content.size = Vector2(TILE_W, TILE_H)
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vp.add_child(content)
+	var tilt := TextureRect.new()
+	tilt.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	tilt.texture = vp.get_texture()
+	tilt.stretch_mode = TextureRect.STRETCH_SCALE
+	tilt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var tmat := ShaderMaterial.new()
+	tmat.shader = load("res://shaders/card_tilt_3d.gdshader")
+	tmat.set_shader_parameter("rect_size", Vector2(TILE_W, TILE_H))
+	tmat.set_shader_parameter("fov", 50.0)
+	tmat.set_shader_parameter("cull_back", false)
+	tmat.set_shader_parameter("inset", 0.14)
+	tmat.set_shader_parameter("y_rot", 0.0)
+	tmat.set_shader_parameter("x_rot", 0.0)
+	tilt.material = tmat
+	visual.add_child(tilt)
+	tile.set_meta("tilt_mat", tmat)
+
 	var face := Panel.new()
 	face.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	face.add_theme_stylebox_override("panel", T.bone_tile())
 	face.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	visual.add_child(face)
+	content.add_child(face)
 
 	var sheen := Panel.new()
 	sheen.add_theme_stylebox_override("panel", T.tile_sheen())
@@ -1458,7 +1501,7 @@ func _make_tile(card: Dictionary) -> Control:
 	sheen.offset_top = 8
 	sheen.offset_bottom = TILE_H * 0.42
 	sheen.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	visual.add_child(sheen)
+	content.add_child(sheen)
 
 	var letter := _label(card["char"], 84, T.INK, Color("c9b68c", 0.9), 5)
 	letter.add_theme_font_override("font", _tile_font)  # pixel taş fontu + açık kontur (kabartma)
@@ -1466,11 +1509,11 @@ func _make_tile(card: Dictionary) -> Control:
 	letter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	letter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	letter.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	visual.add_child(letter)
+	content.add_child(letter)
 
 	var val := str(LETTER_VALUES.chips(card["char"]))
-	visual.add_child(_corner_pip(val, true))
-	visual.add_child(_corner_pip(val, false))
+	content.add_child(_corner_pip(val, true))
+	content.add_child(_corner_pip(val, false))
 
 	# Geliştirme (foil/holo/poly/altın/cam) — renkli kenar + köşe sembolü
 	var enh = card.get("enhancements", [])
@@ -1486,7 +1529,7 @@ func _make_tile(card: Dictionary) -> Control:
 		gs.border_color = ecol
 		glow.add_theme_stylebox_override("panel", gs)
 		glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		visual.add_child(glow)
+		content.add_child(glow)
 		var badge := _label(e["symbol"], 30, ecol, T.OUTLINE, 4)
 		badge.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 		badge.offset_left = -40
@@ -1495,7 +1538,7 @@ func _make_tile(card: Dictionary) -> Control:
 		badge.offset_bottom = 40
 		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		visual.add_child(badge)
+		content.add_child(badge)
 		# SÜREKLİ PARILTI (specular sweep) — enhancement renginde, glow değil
 		var shim := ColorRect.new()
 		shim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1509,7 +1552,7 @@ func _make_tile(card: Dictionary) -> Control:
 		smat.shader = load("res://shaders/tile_shimmer.gdshader")
 		smat.set_shader_parameter("tint", Color(ecol.r, ecol.g, ecol.b, 1.0))
 		shim.material = smat
-		visual.add_child(shim)
+		content.add_child(shim)
 		tile.set_meta("enh_color", ecol)  # oynanınca renkli kıvılcım için
 
 	tile.gui_input.connect(_on_tile_input.bind(int(card["id"])))
@@ -1893,15 +1936,18 @@ func _load_wav(path: String) -> AudioStream:
 # PNG'yi HAM BAYTTAN yükle — .import gerektirmez. Taze clone'da yeni PNG'lerin .import'u yok
 # (gitignore'lu) ve bu makinede editör import'u çöküyor → load() patlıyor. Ham bayt her zaman çalışır.
 func _load_png(path: String) -> Texture2D:
-	if not FileAccess.file_exists(path):
-		push_error("PNG bulunamadı: " + path)
-		return null
-	var img := Image.new()
-	if img.load_png_from_buffer(FileAccess.get_file_as_bytes(path)) != OK:
-		push_error("PNG çözülemedi: " + path)
-		return null
-	img.generate_mipmaps()  # LINEAR_WITH_MIPMAPS filtresi için (küçülürken yumuşak; pixel-art NEAREST'te kullanmaz)
-	return ImageTexture.create_from_image(img)
+	# Import edilmiş kaynak olarak yükle (export'ta ham .png pakete girmez; load() remap'le çalışır).
+	# Editör/export ikisinde de çalışır; eksikse ham bayta düşer (editörde import bekleyen dosya için).
+	var t = load(path)
+	if t is Texture2D:
+		return t
+	if FileAccess.file_exists(path):
+		var img := Image.new()
+		if img.load_png_from_buffer(FileAccess.get_file_as_bytes(path)) == OK:
+			img.generate_mipmaps()
+			return ImageTexture.create_from_image(img)
+	push_error("PNG yüklenemedi: " + path)
+	return null
 
 # Prosedürel "coin/collect" sesi: verilen frekansları sırayla çalan, üstel sönümlü kısa ton.
 # freqs: ardışık ton dizisi (yükselen → coin/arp hissi); decay: sönüm hızı; amp: genlik.
@@ -2202,9 +2248,7 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 			_:
 				# Joker/patron adımı — önizlemede OLMAYAN (rastgele) etki tek tek "bam"lar.
 				var jcard := _find_joker_card(String(step.get("id", "")))
-				var src_pos := _node_center(mult_seal_panel) + Vector2(0, -52)
-				if jcard != null:
-					src_pos = _node_center(jcard) + Vector2(0, -jcard.size.y * 0.5 - 18.0)
+				var src_pos := _word_top(fired)   # joker katkısı KELİMENİN üstünde gösterilir (jokerin değil)
 				var juiced := false
 				for op in step["ops"]:
 					run_chip = _op_chip(op, run_chip)
@@ -2214,7 +2258,7 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 							_juice_joker(jcard)  # squash/stretch zıplama (karakter)
 							_ember_burst(_node_center(jcard), 10, 2.6)
 							juiced = true
-						_show_op(op, src_pos, run_chip, run_mult)
+						_show_op(op, src_pos, run_chip, run_mult, true, true, true)  # kelime üstü + KÜÇÜK karo + harf dalgası
 						await get_tree().create_timer(joker_step_delay).timeout
 						disp_chip = maxi(disp_chip, run_chip)
 						disp_mult = maxf(disp_mult, run_mult)
@@ -2254,10 +2298,24 @@ func _score_sequence(res: Dictionary, fired: Array, prev_score: int) -> void:
 # yükselen perdeli "bam" sesi + sayacı yeni değere akıt. run = op SONRASI değer.
 # set_box=false → baloncuk + pop/kıvılcım/ses gösterilir AMA kutu değeri değişmez (önizleme tabanı
 # zaten kutuda; baloncuk "juice" olarak görünür, kutu düşmez).
-func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float, set_box: bool = true) -> void:
+# Skorlanan kelimenin ÜSTÜndeki merkez konum — joker katkıları burada gösterilir.
+func _word_top(fired: Array) -> Vector2:
+	var c := Vector2.ZERO
+	var n := 0
+	for t in fired:
+		if is_instance_valid(t):
+			c += _node_center(t)
+			n += 1
+	if n == 0:
+		return _node_center(mult_seal_panel) + Vector2(0, -52)
+	c /= float(n)
+	c.y -= TILE_H * 0.5 + 58.0
+	return c
+
+func _show_op(op: Dictionary, src_pos: Vector2, run_chip: int, run_mult: float, set_box: bool = true, small: bool = false, wave: bool = false) -> void:
 	var is_chip: bool = op.get("op", "") == "chip"
-	# Katkı, ETKİ ETTİĞİ yerde (harf/joker üstü) karo'lu büyük puan + "ÇARPAN/ÇİP" etiketiyle (Balatro tarzı).
-	_float_num(src_pos, _op_value(op), T.CHIP_BADGE if is_chip else T.MULT, "ÇİP" if is_chip else "ÇARPAN")
+	# Katkı karo'lu puan + "Çarp./Çip" etiketiyle. small=küçük karo, wave=her harf bağımsız dalga.
+	_float_num(src_pos, _op_value(op), T.CHIP_BADGE if is_chip else T.MULT, "Çip" if is_chip else "Çarp.", 0.2, small, wave)
 	if is_chip:
 		if set_box:
 			_count_label(chip_value, run_chip, count_tick_dur)
@@ -2341,6 +2399,11 @@ func _fire_tile(tile: Control, gain: int) -> void:
 	# Spring overshoot ile HOP (yukarı zıpla) + scale punch + ufak rastgele eğim (organik his).
 	tile.pivot_offset = tile.size / 2.0
 	tile.z_index = 20  # tetiklenen taş diğerlerinin ÖNÜNE çıksın (Balatro: aktif kart üstte)
+	# parlama flaşı — taş tetiklenince bir an parlar (daha canlı/güzel his)
+	if tile.has_meta("visual"):
+		var _vf: Control = tile.get_meta("visual")
+		_vf.modulate = Color(1.8, 1.8, 1.8, 1.0)
+		create_tween().tween_property(_vf, "modulate", Color(1, 1, 1, 1), 0.3).set_trans(Tween.TRANS_SINE)
 	var y0 := tile.position.y
 	var up := tile_trigger_dur * 0.42
 	var down := maxf(0.04, tile_trigger_dur - up)
@@ -2376,7 +2439,7 @@ func _float_gain_on_tile(tile: Control, gain: int) -> void:
 
 # Verilen KONUMDA karo'lu büyük puan ("+50" / "×1.5" / "+10"). color = karo rengi
 # (çip → mavi, çarpan → kırmızı). Radiuslu pill DEĞİL — keskin karo + kalın puan.
-func _float_num(top: Vector2, text: String, color: Color, label: String = "", num_delay: float = 0.2) -> void:
+func _float_num(top: Vector2, text: String, color: Color, label: String = "", num_delay: float = 0.2, small: bool = false, wave: bool = false) -> void:
 	var holder := Control.new()
 	holder.z_index = 46
 	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2386,53 +2449,76 @@ func _float_num(top: Vector2, text: String, color: Color, label: String = "", nu
 	# KARO — büyük, ORTALI, DÜŞÜK opacity (pixel). ÖNCE gelir; puan ÜSTÜNE biner.
 	var dia := Panel.new()
 	var dsb := StyleBoxFlat.new()
-	dsb.bg_color = Color(color.r, color.g, color.b, 0.32)  # düşük opacity
+	dsb.bg_color = Color(color.r, color.g, color.b, 0.9)  # belirgin ama SADE (border YOK)
 	dsb.set_corner_radius_all(0)
 	dsb.anti_aliasing = false
 	dia.add_theme_stylebox_override("panel", dsb)
-	var dsz := 66.0
+	var dsz := 50.0 if small else 62.0   # joker: karo ×N'in ARKASINDA backdrop (yazı boyutu olmak zorunda değil)
 	dia.size = Vector2(dsz, dsz)
 	dia.position = Vector2(-dsz / 2.0, -dsz / 2.0)
 	dia.pivot_offset = Vector2(dsz / 2.0, dsz / 2.0)
-	dia.rotation = deg_to_rad(45.0)
+	dia.rotation = deg_to_rad(45.0 + randf_range(-22.0, 22.0))  # sallanarak otursun
 	dia.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dia.modulate.a = 0.0
 	dia.scale = Vector2(0.4, 0.4)
 	holder.add_child(dia)
 	# Puan — karonun TAM ÜSTÜNDE ortalı (yanında DEĞİL), beyaz kalın kontur, pixel font; SONRA gelir
-	var lbl := _label(text, 46, Color.WHITE, Color(0.05, 0.03, 0.04), 6)
-	lbl.add_theme_font_override("font", _tile_font)
-	lbl.size = Vector2(140, 60)
-	lbl.position = Vector2(-70, -30)
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var fsz: int = 62 if small else 58   # joker ×N → biraz büyük harfler
+	var lbl: Control
+	if wave:
+		# her HARF bağımsız aşağı-yukarı dalgalansın (RichTextLabel [wave])
+		var rt := RichTextLabel.new()
+		rt.bbcode_enabled = true
+		rt.scroll_active = false
+		rt.autowrap_mode = TextServer.AUTOWRAP_OFF
+		rt.add_theme_font_override("normal_font", _tile_font)
+		rt.add_theme_font_size_override("normal_font_size", fsz)
+		rt.add_theme_color_override("default_color", Color.WHITE)
+		rt.add_theme_constant_override("outline_size", 7)
+		rt.add_theme_color_override("font_outline_color", Color(0.05, 0.03, 0.04))
+		rt.text = "[center][wave amp=22 freq=5]%s[/wave][/center]" % text
+		lbl = rt
+	else:
+		var l := _label(text, fsz, Color.WHITE, Color(0.05, 0.03, 0.04), 7)
+		l.add_theme_font_override("font", _tile_font)
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lbl = l
+	lbl.size = Vector2(180, 76)
+	lbl.position = Vector2(-90, -34)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	lbl.modulate.a = 0.0
+	lbl.pivot_offset = Vector2(90, 38)   # punch için merkez pivot
+	lbl.scale = Vector2(0.5, 0.5)
 	holder.add_child(lbl)
 	# "ÇARPAN" / "ÇİP" küçük etiketi (Balatro "X2 Mult" tarzı) — değerin ALTINDA, renk tonlu
 	var slbl: Label = null
 	if label != "":
-		slbl = _label(label, 19, color.lerp(Color.WHITE, 0.25), Color(0.05, 0.03, 0.04), 4)
+		slbl = _label(label, 28, color.lerp(Color.WHITE, 0.3), Color(0.05, 0.03, 0.04), 5)
 		slbl.add_theme_font_override("font", _tile_font)
-		slbl.size = Vector2(150, 26)
-		slbl.position = Vector2(-75, 26)
-		slbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		slbl.size = Vector2(170, 50)
+		slbl.position = Vector2(dsz * 0.55 + 6.0, -25)   # ×N'in/karonun SAĞINDA (yanında, altında DEĞİL)
+		slbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		slbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		slbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		slbl.modulate.a = 0.0
 		holder.add_child(slbl)
-	# 1) ÖNCE karo: küçükten yaylanarak belir
+	# 1) ÖNCE karo: küçükten yaylanarak belir + SALLANARAK 45°'ye otur (elastic)
 	var dt := create_tween()
 	dt.set_parallel(true)
-	dt.tween_property(dia, "modulate:a", 1.0, 0.14)
-	dt.tween_property(dia, "scale", Vector2(1.12, 1.12), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	dt.chain().tween_property(dia, "scale", Vector2.ONE, 0.14).set_trans(Tween.TRANS_SINE)
-	# 2) SONRA puan: karonun üstünde belir (num_delay küçükse "snappy" = anında pop)
+	dt.tween_property(dia, "modulate:a", 1.0, 0.12)
+	dt.tween_property(dia, "scale", Vector2(1.22, 1.22), 0.22).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	dt.chain().tween_property(dia, "scale", Vector2.ONE, 0.16).set_trans(Tween.TRANS_SINE)
+	var wt := create_tween()  # karo dönme wobble (sallanarak otursun)
+	wt.tween_property(dia, "rotation", deg_to_rad(45.0), 0.6).set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+	# 2) SONRA puan: karonun üstünde POP (sallanarak büyür) + belir
 	var lt := create_tween()
 	lt.tween_interval(num_delay)
-	lt.tween_property(lbl, "modulate:a", 1.0, 0.14)
+	lt.set_parallel(true)
+	lt.tween_property(lbl, "modulate:a", 1.0, 0.12)
+	lt.tween_property(lbl, "scale", Vector2.ONE, 0.34).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	if slbl != null:
-		lt.parallel().tween_property(slbl, "modulate:a", 1.0, 0.14)
+		lt.tween_property(slbl, "modulate:a", 1.0, 0.14)
 	# 3) Birlikte yavaşça yüksel + sön
 	var rt := create_tween()
 	rt.tween_interval(0.2)
